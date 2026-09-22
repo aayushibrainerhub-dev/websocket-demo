@@ -25,6 +25,7 @@ dependencies = [
     "rapidfuzz>=3.14.6",
     "faster-whisper>=1.2.1",
     "piper-tts>=1.8.0",
+    "ngrok>=1.4.0",
 ]
 
 [project.scripts]

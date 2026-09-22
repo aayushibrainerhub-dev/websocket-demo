@@ -1,8 +1,10 @@
 import hashlib
 import hmac
+import json
 import os
 import re
 import secrets
+import uuid
 from rapidfuzz import fuzz
 from datetime import datetime, timedelta, timezone
 
@@ -18,6 +20,8 @@ from apps.models.database import SessionLocal, lifespan
 from apps.models.model import Message, User
 from apps.ws_service import ConnectionManager
 
+import asyncio
+import httpx
 import tempfile
 from fastapi import UploadFile, File
 from apps.services.stt import stt
@@ -26,15 +30,27 @@ from apps.services.tts import speak, generate_tts
 from fastapi.responses import Response
 from apps.services.confirmation import parse_confirmation
 
-
 app = FastAPI(lifespan=lifespan)
+N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL", "")
 manager = ConnectionManager()
 voice_sessions = {}
+# In-memory store for call report data keyed by call_id.
+# n8n's HTTP Request node fetches from GET /api/calls/{call_id}/report-data.
+# Capped at 200 entries; oldest entry evicted when full.
+call_reports: dict = {}
+MAX_CALL_REPORTS = 200
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "templates", "static")), name="static")
 JWT_SECRET = os.getenv("JWT_SECRET", "development-only-change-this-secret")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_MINUTES = 60
+CALL_SIGNAL_TYPES = {
+    "call_offer",
+    "call_answer",
+    "call_ice",
+    "call_reject",
+    "call_end",
+}
 
 
 def hash_password(password: str) -> str:
@@ -178,6 +194,55 @@ async def chat_page():
     return FileResponse(os.path.join(BASE_DIR, "templates", "index.html"))
 
 
+async def relay_call_signal(payload: dict, sender_id: int, default_target_id: int | None) -> bool:
+    signal_type = payload.get("type")
+    if signal_type not in CALL_SIGNAL_TYPES:
+        return False
+
+    print("payload------------------------------------->", payload)
+    target_id = payload.get("target_id", default_target_id)
+    try:
+        target_id = int(target_id)
+    except (TypeError, ValueError):
+        return True
+
+    if target_id == sender_id:
+        return True
+
+    event = {
+        "type": signal_type,
+        "sender_id": sender_id,
+        "receiver_id": target_id,
+        "sdp": payload.get("sdp"),
+        "candidate": payload.get("candidate"),
+    }
+    await manager.send_message(target_id, event)
+    return True
+
+
+@app.websocket("/ws/signal")
+async def signaling_endpoint(
+    websocket: WebSocket,
+    token: str = Query(...),
+):
+    user_id = get_user_id_from_token(token)
+    async with SessionLocal() as session:
+        user = await session.get(User, user_id) if user_id is not None else None
+        if user is None:
+            await websocket.close(code=1008)
+            return
+        user_pk = user.id
+
+    await manager.connect(user_pk, websocket)
+    try:
+        while True:
+            payload = await websocket.receive_json()
+            print("payload in signaling-endpoint------------------------------------------", payload)
+            await relay_call_signal(payload, user_pk, payload.get("target_id"))
+    except WebSocketDisconnect:
+        manager.disconnect(user_pk, websocket)
+
+
 @app.websocket("/ws/{receiver_id}")
 async def websocket_endpoint(
     websocket: WebSocket,
@@ -197,6 +262,8 @@ async def websocket_endpoint(
         try:
             while True:
                 payload = await websocket.receive_json()
+                if await relay_call_signal(payload, sender.id, receiver.id):
+                    continue
                 content = MessageCreate.model_validate(payload).content.strip()
                 if not content or len(content) > 2000:
                     await websocket.send_json({
@@ -601,3 +668,275 @@ async def voice_transcribe(
         return {"text": text}
     finally:
         os.remove(temp_path)
+
+
+async def _transcribe_upload(upload: UploadFile | None) -> str:
+    """Save upload to temp file, transcribe, clean up."""
+    if upload is None:
+        return ""
+    content = await upload.read()
+    if not content:
+        return ""
+    suffix = os.path.splitext(upload.filename or ".webm")[1] or ".webm"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as f:
+        f.write(content)
+        temp_path = f.name
+    try:
+        return await asyncio.to_thread(stt.transcribe, temp_path)
+    except Exception as exc:
+        print(f"[call-summary] transcribe error: {exc}")
+        return ""
+    finally:
+        os.remove(temp_path)
+
+
+@app.post("/api/call-summary")
+async def call_summary(
+    authorization: str | None = Header(default=None),
+    local_audio: UploadFile | None = File(default=None),
+    remote_audio: UploadFile | None = File(default=None),
+    peer_name: str = "",
+    my_name: str = "",
+    call_start: str = "",
+    call_end: str = "",
+    call_events: str = "",   # optional JSON array of browser-side events
+):
+    """
+    Receives local + remote audio blobs from the browser after a video call ends.
+    Transcribes both using Whisper (faster-whisper), then forwards an enriched
+    JSON payload to the n8n webhook for OpenAI summarisation + Gmail delivery.
+    """
+    user = await authenticated_user(authorization)
+
+    # Transcribe both sides concurrently
+    local_text, remote_text = await asyncio.gather(
+        _transcribe_upload(local_audio),
+        _transcribe_upload(remote_audio),
+    )
+
+    my_display = my_name or user.username
+    peer_display = peer_name or "Peer"
+
+    # Build readable interleaved transcript
+    transcript_lines = []
+    if local_text:
+        transcript_lines.append(f"{my_display}: {local_text}")
+    if remote_text:
+        transcript_lines.append(f"{peer_display}: {remote_text}")
+    full_transcript = "\n".join(transcript_lines)
+    if not full_transcript.strip():
+        full_transcript = "(No speech detected in the call recording)"
+
+    # ── Derived fields for the OpenAI prompt ──────────────────────────
+    call_id = str(uuid.uuid4())
+
+    # Duration
+    duration_str = "Not available"
+    try:
+        from datetime import datetime as _dt
+        fmt = "%Y-%m-%dT%H:%M:%S.%fZ"
+        t_start = _dt.strptime(call_start.replace("Z", "Z"), fmt) if call_start else None
+        t_end   = _dt.strptime(call_end.replace("Z", "Z"),   fmt) if call_end   else None
+        if t_start and t_end:
+            delta = t_end - t_start
+            total_sec = int(delta.total_seconds())
+            mins, secs = divmod(total_sec, 60)
+            duration_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+    except Exception:
+        pass
+
+    # Participants list
+    participants = [
+        {"name": my_display,   "role": "caller"},
+        {"name": peer_display, "role": "receiver"},
+    ]
+
+    # Important events — from browser-sent JSON array or sensible defaults
+    important_events = []
+    try:
+        if call_events:
+            important_events = json.loads(call_events)
+    except Exception:
+        pass
+
+    if not important_events:
+        # Synthesise minimal events from what we know
+        if call_start:
+            important_events.append({"time": call_start, "event": "Call started",
+                                     "participant": my_display})
+            important_events.append({"time": call_start, "event": "Participant joined",
+                                     "participant": my_display})
+            important_events.append({"time": call_start, "event": "Participant joined",
+                                     "participant": peer_display})
+        if call_end:
+            important_events.append({"time": call_end, "event": "Call ended",
+                                     "participant": my_display})
+
+    payload = {
+        # ── Identity & timing ──────────────────────────────────────────
+        "call_id":         call_id,
+        "caller":          my_display,
+        "receiver":        peer_display,
+        "participants":    participants,
+        "call_start":      call_start or "Not available",
+        "call_end":        call_end   or "Not available",
+        "call_duration":   duration_str,
+        # ── Content ────────────────────────────────────────────────────
+        "local_transcript":  local_text  or "(no speech)",
+        "remote_transcript": remote_text or "(no speech)",
+        "full_transcript":   full_transcript,
+        # ── Events (for Important Events section of the prompt) ────────
+        "important_events": important_events,
+        # ── Scaffold for OpenAI to fill in ─────────────────────────────
+        "decisions":    [],
+        "action_items": [],
+        "technical_issues": [],
+    }
+
+    # ── Store report so n8n can fetch it via GET /api/calls/{call_id}/report-data ──
+    if len(call_reports) >= MAX_CALL_REPORTS:
+        # Evict the oldest entry
+        oldest_key = next(iter(call_reports))
+        del call_reports[oldest_key]
+    call_reports[call_id] = payload
+
+    print(
+        f"[call-summary] Stored report id={call_id} | "
+        f"caller={my_display} peer={peer_display} duration={duration_str}"
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            n8n_resp = await client.post(N8N_WEBHOOK_URL, json=payload)
+        n8n_resp.raise_for_status()
+        print(f"[call-summary] n8n responded: {n8n_resp.status_code}")
+    except httpx.HTTPStatusError as e:
+        print(f"[call-summary] n8n HTTP error: {e.response.status_code} {e.response.text}")
+        raise HTTPException(502, f"n8n returned {e.response.status_code}")
+    except Exception as e:
+        print(f"[call-summary] n8n request failed: {e}")
+        raise HTTPException(502, "Could not reach n8n webhook")
+
+    return {
+        "ok":           True,
+        "call_id":      call_id,
+        "caller":       my_display,
+        "receiver":     peer_display,
+        "duration":     duration_str,
+        "transcript":   full_transcript,
+        "n8n_status":   n8n_resp.status_code,
+    }
+
+
+@app.get("/api/calls/{call_id}/report-data")
+async def get_call_report_data(call_id: str):
+    report = call_reports.get(call_id)
+    if report is None:
+        raise HTTPException(
+            404,
+            detail=f"Report not found for call_id={call_id}. "
+                   "It may have expired or the call hasn't been processed yet."
+        )
+    return report
+
+
+@app.get("/api/calls/debug/list")
+async def list_stored_reports():
+    return {
+        "stored_count": len(call_reports),
+        "call_ids": list(call_reports.keys()),
+    }
+
+
+DUMMY_CONVERSATION = """Rahul: Hi Priya, thanks for joining. I wanted to discuss the current status of the website and what we need to finish before the launch.
+Priya: Sure. The frontend is mostly complete. The login page, dashboard, and user profile are finished. I'm currently working on the notification feature.
+Rahul: How much work is left on the notification feature?
+Priya: The UI is almost finished, but I still need the notification API from the backend.
+Rahul: I spoke with Amit earlier. He said the API should be ready by Thursday.
+Priya: Okay. Once I get the API, I should need about two days to integrate it and test the feature.
+Rahul: So integration testing should be finished by Friday?
+Priya: Yes, assuming the API is delivered on Thursday.
+Rahul: Good. What about the database migration?
+Priya: I don't have any issues on the frontend side. Is the migration already tested?
+Rahul: Not completely. The migration scripts are ready, but they still need to be tested on the staging database.
+Priya: That should be done before we start the final testing.
+Rahul: Agreed. There's also an issue with the SMTP configuration in staging. Emails aren't being delivered correctly.
+Priya: Is that blocking the notification development?
+Rahul: No, development can continue, but we need to fix it before production deployment.
+Priya: Okay. When are we planning to launch?
+Rahul: The current target is Monday, September 28.
+Priya: That's quite soon. Are we deploying to AWS?
+Rahul: Yes. Production will be hosted on AWS. We're keeping the current server for staging.
+Priya: Do we have the production domain ready?
+Rahul: Not yet. The client still needs to confirm the final branding and domain name.
+Priya: Understood. I'll continue with the frontend work while we wait for the API.
+Rahul: I'll follow up with the infrastructure team today about the SMTP issue and make sure the database migration testing is completed.
+Priya: I'll finish the notification UI today and start integration as soon as the API is available.
+Rahul: Perfect. Let's target Friday for the complete integration test.
+Priya: Sounds good. If we find any major issues during testing, we'll discuss them before the launch.
+Rahul: Exactly. I'll schedule a short review meeting for Friday afternoon.
+Priya: Great. Thanks, Rahul.
+Rahul: Thanks, Priya. Talk to you Friday."""
+
+
+@app.post("/api/calls/test-dummy")
+async def trigger_dummy_call_summary():
+    """
+    Simulates a completed call with dummy transcript between Rahul and Priya,
+    stores report in memory for n8n retrieval, and forwards payload to n8n webhook.
+    """
+    call_id = str(uuid.uuid4())
+    rahul_lines = "\n".join(
+        [line.split("Rahul: ", 1)[1] for line in DUMMY_CONVERSATION.splitlines() if line.startswith("Rahul: ")]
+    )
+    priya_lines = "\n".join(
+        [line.split("Priya: ", 1)[1] for line in DUMMY_CONVERSATION.splitlines() if line.startswith("Priya: ")]
+    )
+
+    payload = {
+        "call_id": call_id,
+        "caller": "Rahul",
+        "receiver": "Priya",
+        "participants": [
+            {"name": "Rahul", "role": "caller"},
+            {"name": "Priya", "role": "receiver"},
+        ],
+        "call_start": "2026-09-22T10:00:00.000Z",
+        "call_end": "2026-09-22T10:08:45.000Z",
+        "call_duration": "8m 45s",
+        "local_transcript": rahul_lines,
+        "remote_transcript": priya_lines,
+        "full_transcript": DUMMY_CONVERSATION,
+        "important_events": [
+            {"time": "2026-09-22T10:00:00.000Z", "event": "Call started", "participant": "Rahul"},
+            {"time": "2026-09-22T10:00:05.000Z", "event": "Participant joined", "participant": "Priya"},
+            {"time": "2026-09-22T10:08:45.000Z", "event": "Call ended", "participant": "Rahul"},
+        ],
+        "decisions": [],
+        "action_items": [],
+        "technical_issues": [],
+    }
+
+    if len(call_reports) >= MAX_CALL_REPORTS:
+        oldest_key = next(iter(call_reports))
+        del call_reports[oldest_key]
+    call_reports[call_id] = payload
+
+    n8n_status = None
+    n8n_body = ""
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            n8n_resp = await client.post(N8N_WEBHOOK_URL, json=payload)
+        n8n_status = n8n_resp.status_code
+        n8n_body = n8n_resp.text
+    except Exception as e:
+        n8n_body = str(e)
+
+    return {
+        "ok": True,
+        "call_id": call_id,
+        "n8n_status": n8n_status,
+        "n8n_response": n8n_body,
+        "report_data_url": f"/api/calls/{call_id}/report-data",
+        "summary_webhook_url": N8N_WEBHOOK_URL,
+    }

@@ -1,11 +1,13 @@
 <!doctype html>
 <html lang="en">
+
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Relay | Private conversations</title>
     <link rel="stylesheet" href="/static/css/app.css">
 </head>
+
 <body>
     <main class="shell">
 
@@ -60,12 +62,14 @@
                         <span>relay</span>
                     </div>
                     <div class="brand-actions">
-                        <button id="globalVoiceBtn" class="icon-button voice-global" title="Voice assistant" type="button">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18">
-                                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-                                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-                                <line x1="12" y1="19" x2="12" y2="23"/>
-                                <line x1="8" y1="23" x2="16" y2="23"/>
+                        <button id="globalVoiceBtn" class="icon-button voice-global" title="Voice assistant"
+                            type="button">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                stroke-linecap="round" stroke-linejoin="round" width="18" height="18">
+                                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                                <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                                <line x1="12" y1="19" x2="12" y2="23" />
+                                <line x1="8" y1="23" x2="16" y2="23" />
                             </svg>
                         </button>
                         <button id="logoutButton" class="icon-button" title="Sign out" type="button">↪</button>
@@ -93,15 +97,16 @@
                     </div>
                     <div class="tutor-avatar" aria-hidden="true">
                         <svg viewBox="0 0 160 160" width="120" height="120">
-                            <circle cx="80" cy="80" r="72" fill="#f3d98a"/>
-                            <circle cx="80" cy="92" r="46" fill="#f0c27a"/>
-                            <ellipse cx="80" cy="58" rx="42" ry="28" fill="#3d4a5c"/>
-                            <ellipse cx="80" cy="48" rx="38" ry="18" fill="#2c3644"/>
-                            <circle cx="64" cy="88" r="7" fill="#2a2a2a"/>
-                            <circle cx="96" cy="88" r="7" fill="#2a2a2a"/>
-                            <path d="M70 108c6 6 14 6 20 0" fill="none" stroke="#2a2a2a" stroke-width="3" stroke-linecap="round"/>
-                            <rect x="48" y="92" width="22" height="6" rx="3" fill="#c9d7e8" opacity="0.9"/>
-                            <rect x="90" y="92" width="22" height="6" rx="3" fill="#c9d7e8" opacity="0.9"/>
+                            <circle cx="80" cy="80" r="72" fill="#f3d98a" />
+                            <circle cx="80" cy="92" r="46" fill="#f0c27a" />
+                            <ellipse cx="80" cy="58" rx="42" ry="28" fill="#3d4a5c" />
+                            <ellipse cx="80" cy="48" rx="38" ry="18" fill="#2c3644" />
+                            <circle cx="64" cy="88" r="7" fill="#2a2a2a" />
+                            <circle cx="96" cy="88" r="7" fill="#2a2a2a" />
+                            <path d="M70 108c6 6 14 6 20 0" fill="none" stroke="#2a2a2a" stroke-width="3"
+                                stroke-linecap="round" />
+                            <rect x="48" y="92" width="22" height="6" rx="3" fill="#c9d7e8" opacity="0.9" />
+                            <rect x="90" y="92" width="22" height="6" rx="3" fill="#c9d7e8" opacity="0.9" />
                         </svg>
                     </div>
                     <p class="tutor-hello">Hey! My name is</p>
@@ -120,30 +125,53 @@
                 </div>
 
                 <div id="activeConversation" class="hidden full-height">
+
                     <header class="conversation-header">
                         <div class="person-avatar" id="conversationAvatar"></div>
-                        <div>
+                        <div class="conversation-meta">
                             <h2 id="conversationName"></h2>
                             <p id="connectionStatus">Connecting...</p>
                         </div>
+                        <button type="button" class="call-btn" data-video-call title="Start video call">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                stroke-linecap="round" stroke-linejoin="round" width="16" height="16">
+                                <polygon points="23 7 16 12 23 17 23 7" />
+                                <rect x="1" y="5" width="15" height="14" rx="2" />
+                            </svg>
+                            Video call
+                        </button>
                     </header>
 
-                    <div id="messages" class="messages"></div>
+                    <div id="messages" class="messages">
+
+                    </div>
+
 
                     <form id="messageForm" class="composer">
                         <button type="button" id="chatVoiceBtn" class="chat-voice-btn" title="Voice message">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16">
-                                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-                                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-                                <line x1="12" y1="19" x2="12" y2="23"/>
-                                <line x1="8" y1="23" x2="16" y2="23"/>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                stroke-linecap="round" stroke-linejoin="round" width="16" height="16">
+                                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                                <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                                <line x1="12" y1="19" x2="12" y2="23" />
+                                <line x1="8" y1="23" x2="16" y2="23" />
                             </svg>
                         </button>
-                        <input id="messageInput" placeholder="Type anything here..." maxlength="2000" autocomplete="off">
+                        <button type="button" class="chat-call-btn" data-video-call title="Start video call">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                stroke-linecap="round" stroke-linejoin="round" width="16" height="16">
+                                <polygon points="23 7 16 12 23 17 23 7" />
+                                <rect x="1" y="5" width="15" height="14" rx="2" />
+                            </svg>
+                            Call
+                        </button>
+                        <input id="messageInput" placeholder="Type anything here..." maxlength="2000"
+                            autocomplete="off">
                         <button class="send-button" title="Send message" type="submit">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="15" height="15">
-                                <line x1="12" y1="19" x2="12" y2="5"/>
-                                <polyline points="5 12 12 5 19 12"/>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                                stroke-linecap="round" stroke-linejoin="round" width="15" height="15">
+                                <line x1="12" y1="19" x2="12" y2="5" />
+                                <polyline points="5 12 12 5 19 12" />
                             </svg>
                         </button>
                     </form>
@@ -171,11 +199,12 @@
                 <p class="vstep-hint">Try: "Send a message to Max saying hi, good morning"</p>
                 <div class="vmic-wrap">
                     <button id="vRecordBtn" class="vmic-orb" title="Click to record" type="button">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-                            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-                            <line x1="12" y1="19" x2="12" y2="23"/>
-                            <line x1="8" y1="23" x2="16" y2="23"/>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                            <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                            <line x1="12" y1="19" x2="12" y2="23" />
+                            <line x1="8" y1="23" x2="16" y2="23" />
                         </svg>
                     </button>
                     <div class="vwaves" id="vWaves1">
@@ -200,11 +229,12 @@
                 <p class="vstep-hint">Sending to <strong id="vReceiverName"></strong></p>
                 <div class="vmic-wrap">
                     <button id="vMsgRecordBtn" class="vmic-orb" title="Click to record your message" type="button">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-                            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-                            <line x1="12" y1="19" x2="12" y2="23"/>
-                            <line x1="8" y1="23" x2="16" y2="23"/>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                            <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                            <line x1="12" y1="19" x2="12" y2="23" />
+                            <line x1="8" y1="23" x2="16" y2="23" />
                         </svg>
                     </button>
                     <div class="vwaves" id="vWaves3">
@@ -224,15 +254,17 @@
                 <p id="vConfirmStatus" class="vstep-status"></p>
                 <div class="vmodal-actions">
                     <button id="vConfirmBtn" class="vbtn-confirm" type="button">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="15" height="15">
-                            <polyline points="20 6 9 17 4 12"/>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                            stroke-linecap="round" stroke-linejoin="round" width="15" height="15">
+                            <polyline points="20 6 9 17 4 12" />
                         </svg>
                         Send
                     </button>
                     <button id="vRetryBtn" class="vbtn-retry" type="button">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14">
-                            <polyline points="1 4 1 10 7 10"/>
-                            <path d="M3.51 15a9 9 0 1 0 .49-3.5"/>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round" width="14" height="14">
+                            <polyline points="1 4 1 10 7 10" />
+                            <path d="M3.51 15a9 9 0 1 0 .49-3.5" />
                         </svg>
                         Cancel
                     </button>
@@ -240,14 +272,69 @@
             </div>
 
             <button id="vCloseBtn" class="vmodal-close" title="Close voice assistant" type="button">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18">
-                    <line x1="18" y1="6" x2="6" y2="18"/>
-                    <line x1="6" y1="6" x2="18" y2="18"/>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                    stroke-linejoin="round" width="18" height="18">
+                    <line x1="18" y1="6" x2="6" y2="18" />
+                    <line x1="6" y1="6" x2="18" y2="18" />
                 </svg>
             </button>
+        </div>
+    </div>
+    <div id="videoModal" class="video-modal hidden">
+        <div class="video-stage">
+            <video id="remoteVideo" autoplay playsinline></video>
+            <audio id="remoteAudio" autoplay></audio>
+            <div id="remotePlaceholder" class="video-placeholder">
+                <div class="person-avatar call-avatar" id="remoteCallAvatar"></div>
+                <p id="callStatusText">Connecting…</p>
+            </div>
+            <div class="video-overlay-top">
+                <span id="callPeerName"></span>
+            </div>
+            <div class="video-pip">
+                <video id="localVideo" autoplay muted playsinline></video>
+                <span>You</span>
+            </div>
+            <div class="video-controls">
+                <button id="muteBtn" class="vc-btn" type="button" title="Mute microphone">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+                        <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                        <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                    </svg>
+                    <span>Mute</span>
+                </button>
+                <button id="cameraBtn" class="vc-btn" type="button" title="Turn camera off">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+                        <polygon points="23 7 16 12 23 17 23 7" />
+                        <rect x="1" y="5" width="15" height="14" rx="2" />
+                    </svg>
+                    <span>Camera</span>
+                </button>
+                <button id="endCallBtn" class="vc-btn vc-btn-end" type="button" title="End call">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+                        <path
+                            d="M10.68 13.31a16 16 0 0 0 6.01 6.01l2.13-2.13a1 1 0 0 1 1.02-.24 11.36 11.36 0 0 0 3.56.57 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1 11.36 11.36 0 0 0 .57 3.56 1 1 0 0 1-.24 1.02z" />
+                    </svg>
+                    <span>End</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div id="incomingCallModal" class="incoming-call hidden">
+        <div class="incoming-card">
+            <p class="incoming-label">INCOMING VIDEO CALL</p>
+            <div class="person-avatar call-avatar" id="incomingCallAvatar"></div>
+            <h3 id="incomingCallName"></h3>
+            <p class="incoming-hint">Live WebRTC video from Relay</p>
+            <div class="incoming-actions">
+                <button id="rejectCallBtn" class="vc-btn vc-btn-reject" type="button">Decline</button>
+                <button id="acceptCallBtn" class="vc-btn vc-btn-accept" type="button">Accept</button>
+            </div>
         </div>
     </div>
 
     <script src="/static/js/app.js"></script>
 </body>
+
 </html>

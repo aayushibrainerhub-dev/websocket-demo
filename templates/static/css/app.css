@@ -19,18 +19,43 @@
 
 * {
   box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: #4a5362 transparent;
 }
 
-html,
-body {
-  height: 100%;
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #3a414c;
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #5a6575;
+}
+
+html {
+  min-height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scroll-behavior: smooth;
 }
 
 body {
+  min-height: 100vh;
   margin: 0;
   color: var(--ink);
   font-family: Manrope, sans-serif;
   background: #c9c4bb;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 button,
@@ -205,12 +230,13 @@ input:focus {
 
 .app-layout {
   max-width: 1280px;
+  width: 100%;
   height: calc(100vh - 44px);
   min-height: 620px;
   margin: auto;
   overflow: hidden;
   display: grid;
-  grid-template-columns: 300px 1fr;
+  grid-template-columns: 400px 1fr;
   background: var(--paper);
   border: 8px solid #111318;
   border-radius: 28px;
@@ -224,6 +250,9 @@ input:focus {
   padding: 18px 16px 16px;
   background: var(--panel);
   border-right: 1px solid var(--line);
+  overflow-y: auto;
+  overflow-x: hidden;
+  max-height: 100%;
 }
 
 .brand-bar {
@@ -325,8 +354,9 @@ input:focus {
   display: grid;
   gap: 8px;
   flex: 1;
-  min-height: 0;
-  overflow: auto;
+  min-height: 120px;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding-right: 4px;
 }
 
@@ -393,6 +423,7 @@ input:focus {
 }
 
 .tutor-card {
+  flex-shrink: 0;
   margin-top: 12px;
   padding: 16px 16px 18px;
   background: var(--gold);
@@ -453,6 +484,10 @@ input:focus {
   position: relative;
   background: var(--paper);
   min-width: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .conversation-empty {
@@ -490,17 +525,36 @@ input:focus {
 }
 
 .conversation-header {
-  height: 72px;
-  padding: 0 28px;
+  position: relative;
+  z-index: 3;
+  flex: 0 0 auto;
+  min-height: 72px;
+  height: auto;
+  padding: 12px 20px;
   display: flex;
-  gap: 14px;
+  gap: 12px;
   align-items: center;
+  color: var(--white);
+  background: var(--panel);
   border-bottom: 1px solid var(--line);
+}
+
+.conversation-meta {
+  flex: 1;
+  min-width: 0;
 }
 
 .conversation-header h2 {
   margin: 0;
+  color: var(--white);
   font-size: 16px;
+}
+
+.conversation-header .person-avatar {
+  width: 40px;
+  height: 40px;
+  background: var(--mint);
+  color: var(--mint-ink);
 }
 
 .conversation-header p {
@@ -513,7 +567,8 @@ input:focus {
   flex: 1;
   min-height: 0;
   padding: 22px 28px 10px;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -1101,3 +1156,228 @@ input:focus {
     margin: 8px 12px 12px;
   }
 }
+
+@media (max-height: 720px) {
+  .shell {
+    padding: 12px;
+  }
+
+  .app-layout {
+    height: auto;
+    min-height: 560px;
+  }
+
+  .auth-layout {
+    min-height: auto;
+    padding: 24px 8px;
+  }
+}
+
+
+
+.call-btn,
+.chat-call-btn {
+  display: inline-flex !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+  color: var(--gold-ink) !important;
+  background: var(--gold) !important;
+}
+
+.call-btn {
+  margin-left: auto;
+  padding: 10px 16px;
+}
+
+.chat-call-btn {
+  padding: 8px 12px;
+}
+
+.call-btn:hover,
+.chat-call-btn:hover {
+  transform: translateY(-1px);
+}
+
+.call-btn.in-call,
+.chat-call-btn.in-call {
+  color: #fff !important;
+  background: #c4453c !important;
+}
+
+.video-modal {
+  position: fixed;
+  inset: 0;
+  background: #000000dd;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1100;
+  animation: fade 0.2s ease both;
+}
+
+.video-stage {
+  position: relative;
+  width: min(980px, 94vw);
+  background: #0b0d11;
+  border-radius: 22px;
+  overflow: hidden;
+  box-shadow: 0 30px 80px #000a;
+}
+
+.video-stage video#remoteVideo {
+  width: 100%;
+  height: min(72vh, 580px);
+  object-fit: cover;
+  display: block;
+  background: #111;
+}
+
+.video-placeholder {
+  position: absolute;
+  inset: 0 0 76px;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 14px;
+  background: radial-gradient(circle at top, #252a33, #111318);
+  color: var(--muted);
+}
+
+.video-placeholder.hidden {
+  display: none;
+}
+
+.person-avatar.call-avatar {
+  width: 88px;
+  height: 88px;
+  margin: 0 auto 10px;
+  font-size: 22px;
+}
+
+#callStatusText {
+  margin: 0;
+  font: 500 13px "DM Mono", monospace;
+  letter-spacing: 0.4px;
+}
+
+.video-overlay-top {
+  position: absolute;
+  top: 16px;
+  left: 18px;
+  padding: 8px 12px;
+  color: #fff;
+  background: #00000066;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  backdrop-filter: blur(8px);
+}
+
+.video-pip {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  width: 168px;
+  overflow: hidden;
+  border-radius: 14px;
+  border: 2px solid #ffffff33;
+  background: #111;
+  box-shadow: 0 10px 28px #0008;
+}
+
+.video-pip video {
+  display: block;
+  width: 100%;
+  height: 118px;
+  object-fit: cover;
+  transform: scaleX(-1);
+}
+
+.video-pip video.unmirrored {
+  transform: none;
+}
+
+.video-pip span {
+  display: block;
+  padding: 5px 8px;
+  color: #fff;
+  background: #00000088;
+  font-size: 10px;
+  letter-spacing: 0.4px;
+}
+
+.video-controls {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  padding: 14px 16px;
+  background: #14171c;
+}
+
+.vc-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 18px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink);
+  background: var(--card);
+  border-radius: 999px;
+  transition: transform 0.15s, background 0.15s;
+}
+
+.vc-btn.active {
+  color: #fff;
+  background: #4a5362;
+}
+
+.vc-btn:hover { transform: translateY(-1px); background: var(--card-hover); }
+.vc-btn-end { background: #d33; color: #fff; }
+.vc-btn-accept { background: #4caf50; color: #fff; }
+.vc-btn-reject { background: #d33; color: #fff; }
+
+.incoming-call {
+  position: fixed;
+  inset: 0;
+  background: #00000088;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1200;
+  animation: fade 0.2s ease both;
+}
+
+.incoming-card {
+  width: 340px;
+  padding: 30px;
+  text-align: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  animation: popIn 0.3s ease both;
+}
+
+.incoming-label {
+  margin: 0 0 16px;
+  color: var(--mint);
+  font: 500 10px "DM Mono", monospace;
+  letter-spacing: 1.5px;
+}
+
+.incoming-card h3 { margin: 0 0 6px; font-size: 20px; }
+.incoming-hint {
+  margin: 0 0 22px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.incoming-actions { display: flex; gap: 10px; }
+.incoming-actions .vc-btn { flex: 1; justify-content: center; }

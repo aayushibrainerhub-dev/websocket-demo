@@ -1,6 +1,7 @@
 const state = {
   session: JSON.parse(localStorage.getItem('relay_session') || 'null'),
   socket: null,
+  signalSocket: null,
   selected: null,
   users: [],
   renderedMessageIds: new Set()
@@ -56,10 +57,6 @@ async function request(url, options = {}) {
 }
 
 
-/* ============================================================
-   AUTHENTICATION
-============================================================ */
-
 async function authenticate(path) {
   const response = await fetch(path, {
     method: 'POST',
@@ -102,6 +99,7 @@ async function authenticate(path) {
   $('profileName').textContent =
     data.username
 
+  connectSignal()
   await loadUsers()
 }
 
@@ -140,17 +138,23 @@ $('logoutButton').addEventListener(
   'click',
   () => {
 
+    state.session = null
+
     if (state.socket) {
       state.socket.close()
     }
 
+    if (state.signalSocket) {
+      state.signalSocket.close()
+      state.signalSocket = null
+    }
+
+    endCall()
     resetVoiceState()
 
     localStorage.removeItem(
       'relay_session'
     )
-
-    state.session = null
 
     setView(false)
   }
@@ -198,10 +202,9 @@ function renderUsers() {
       document.createElement('button')
 
     button.className =
-      `user-row ${
-        state.selected?.id === user.id
-          ? 'active'
-          : ''
+      `user-row ${state.selected?.id === user.id
+        ? 'active'
+        : ''
       }`
 
     const avatar =
@@ -251,7 +254,7 @@ function renderUsers() {
 $('userSearch').addEventListener(
   'input',
   () => {
-    loadUsers().catch(() => {})
+    loadUsers().catch(() => { })
   }
 )
 
@@ -333,28 +336,32 @@ function connect(receiverId) {
     }
 
 
-  state.socket.onmessage =
-    event => {
+  state.socket.onmessage = async event => {
 
-      const data =
-        JSON.parse(event.data)
+    const data = JSON.parse(event.data)
 
-      if (
-        data.type === 'message' &&
-        (
-          data.sender_id === state.selected.id ||
-          data.receiver_id === state.selected.id
-        )
-      ) {
-        renderMessage(data)
-      }
-
-      if (data.type === 'error') {
-
-        $('connectionStatus').textContent =
-          data.message
-      }
+    if (await handleCallSignal(data)) {
+      return
     }
+
+    /* ── CHAT (existing code) ── */
+
+    if (
+      data.type === 'message' &&
+      (
+        data.sender_id === state.selected.id ||
+        data.receiver_id === state.selected.id
+      )
+    ) {
+      renderMessage(data)
+    }
+
+    if (data.type === 'error') {
+
+      $('connectionStatus').textContent =
+        data.message
+    }
+  }
 
 
   state.socket.onclose =
@@ -421,7 +428,7 @@ function renderMessage(message) {
   article
     .querySelector('.bubble')
     .textContent =
-      message.content
+    message.content
 
   $('messages')
     .appendChild(article)
@@ -447,7 +454,7 @@ $('messageForm').addEventListener(
       !content ||
       !state.socket ||
       state.socket.readyState !==
-        WebSocket.OPEN
+      WebSocket.OPEN
     ) {
       return
     }
@@ -591,7 +598,7 @@ async function playPiperText(text) {
   try {
     data =
       await response.json()
-  } catch {}
+  } catch { }
 
   if (!response.ok) {
 
@@ -870,12 +877,12 @@ function stopRecording() {
   if (
     _recorder &&
     _recorder.state ===
-      'recording'
+    'recording'
   ) {
 
     try {
       _recorder.stop()
-    } catch {}
+    } catch { }
   }
 }
 
@@ -1064,7 +1071,7 @@ async function postAudio(
     data =
       await response.json()
 
-  } catch {}
+  } catch { }
 
 
   if (!response.ok) {
@@ -1101,7 +1108,7 @@ $('vRecordBtn')
       if (
         _recorder &&
         _recorder.state ===
-          'recording'
+        'recording'
       ) {
 
         button.textContent =
@@ -1270,7 +1277,7 @@ $('vRecordBtn')
 
           $('vSearchedName')
             .textContent =
-              `Results for "${voice.receiverName}"`
+            `Results for "${voice.receiverName}"`
 
 
           /*
@@ -1611,9 +1618,9 @@ async function startVoiceOptionSelect() {
 
     if (
       data.selected_index ===
-        null ||
+      null ||
       data.selected_index ===
-        undefined
+      undefined
     ) {
 
       const heard =
@@ -1654,7 +1661,7 @@ async function startVoiceOptionSelect() {
       !Number.isInteger(index) ||
       index < 0 ||
       index >=
-        voice.searchResults.length
+      voice.searchResults.length
     ) {
 
       $('vStatus').textContent =
@@ -1983,7 +1990,7 @@ $('vMsgRecordBtn')
       if (
         _recorder &&
         _recorder.state ===
-          'recording'
+        'recording'
       ) {
 
         stopRecording()
@@ -2236,6 +2243,7 @@ async function listenForConfirmation() {
       data.transcribed_text ||
       ''
 
+    console.log('Heard: ' + heard)
 
     $('vConfirmStatus')
       .textContent =
@@ -2354,7 +2362,7 @@ async function sendVoiceMessage() {
         'I could not send the message. Please try again.'
       )
 
-    } catch {}
+    } catch { }
   }
 }
 
@@ -2393,7 +2401,7 @@ $('chatVoiceBtn')
       if (
         _recorder &&
         _recorder.state ===
-          'recording'
+        'recording'
       ) {
 
         button.classList.remove(
@@ -2482,9 +2490,9 @@ async function sendViaSocket(
 
   if (
     state.selected?.id ===
-      receiver.id &&
+    receiver.id &&
     state.socket?.readyState ===
-      WebSocket.OPEN
+    WebSocket.OPEN
   ) {
 
     state.socket.send(
@@ -2583,6 +2591,7 @@ if (state.session) {
     .textContent =
     state.session.username
 
+  connectSignal()
 
   loadUsers()
     .catch(
@@ -2598,4 +2607,894 @@ if (state.session) {
         setView(false)
       }
     )
+}
+
+
+
+/* ============================================================
+   VIDEO CALL (WebRTC live stream)
+============================================================ */
+
+const CALL_TYPES = new Set([
+  'call_offer',
+  'call_answer',
+  'call_ice',
+  'call_reject',
+  'call_end'
+])
+
+const call = {
+  pc: null,
+  localStream: null,
+  inCall: false,
+  incomingOffer: null,
+  peerId: null,
+  peerName: '',
+  pendingIce: [],
+  isAvatarFallback: false,
+  // Recording state
+  localRecorder: null,
+  remoteRecorder: null,
+  localChunks: [],
+  remoteChunks: [],
+  callStartTime: null,
+  recording: false,
+  // Event log (sent to n8n for the OpenAI prompt's Important Events section)
+  events: []
+}
+
+const RTC_CONFIG = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' }
+  ]
+}
+
+
+function wsProtocol() {
+  return location.protocol === 'https:' ? 'wss' : 'ws'
+}
+
+
+function connectSignal() {
+  if (
+    !state.session ||
+    (state.signalSocket &&
+      (state.signalSocket.readyState === WebSocket.OPEN ||
+        state.signalSocket.readyState === WebSocket.CONNECTING))
+  ) {
+    return
+  }
+
+  const socket = new WebSocket(
+    `${wsProtocol()}://${location.host}/ws/signal?token=${state.session.access_token}`
+  )
+
+  state.signalSocket = socket
+
+  socket.onmessage = async event => {
+    const data = JSON.parse(event.data)
+    await handleCallSignal(data)
+  }
+
+  socket.onclose = () => {
+    if (state.signalSocket === socket) {
+      state.signalSocket = null
+    }
+    if (state.session) {
+      setTimeout(connectSignal, 1500)
+    }
+  }
+}
+
+
+function sendCallSignal(payload) {
+  const targetId = payload.target_id || call.peerId
+  const message = JSON.stringify({
+    ...payload,
+    target_id: targetId
+  })
+
+  if (
+    state.signalSocket &&
+    state.signalSocket.readyState === WebSocket.OPEN
+  ) {
+    state.signalSocket.send(message)
+    return
+  }
+
+  if (
+    state.socket &&
+    state.socket.readyState === WebSocket.OPEN
+  ) {
+    state.socket.send(message)
+  }
+}
+
+
+function callerName(userId) {
+  return (
+    state.users.find(user => user.id === userId)?.username ||
+    (state.selected?.id === userId ? state.selected.username : '') ||
+    'Unknown'
+  )
+}
+
+
+function setCallStatus(text) {
+  const status = $('callStatusText')
+  if (status) {
+    status.textContent = text
+  }
+}
+
+
+function setCallButtonsBusy(busy) {
+  document.querySelectorAll('[data-video-call]').forEach(button => {
+    button.classList.toggle('in-call', busy)
+  })
+}
+
+
+function showCallStage(peerName, statusText) {
+  $('callPeerName').textContent = peerName
+  $('remoteCallAvatar').textContent = initials(peerName)
+  setCallStatus(statusText)
+  $('remotePlaceholder').classList.remove('hidden')
+  $('videoModal').classList.remove('hidden')
+  setCallButtonsBusy(true)
+}
+
+
+function setControlLabel(button, label) {
+  const span = button.querySelector('span')
+  if (span) {
+    span.textContent = label
+  }
+}
+
+
+async function flushIce() {
+  if (!call.pc || !call.pc.remoteDescription) {
+    return
+  }
+
+  while (call.pendingIce.length) {
+    const candidate = call.pendingIce.shift()
+    try {
+      await call.pc.addIceCandidate(candidate)
+    } catch { }
+  }
+}
+
+
+function createPeerConnection() {
+  const pc = new RTCPeerConnection(RTC_CONFIG)
+  call.pc = pc
+
+  // Separate stable streams — audio → <audio>, video → <video>
+  // This avoids Chrome's unreliable audio routing through video elements
+  const remoteAudioStream = new MediaStream()
+  const remoteVideoStream = new MediaStream()
+
+  const remoteAudio = $('remoteAudio')
+  const remoteVideo = $('remoteVideo')
+  remoteAudio.srcObject = remoteAudioStream
+  remoteVideo.srcObject = remoteVideoStream
+
+  function tryPlay(el, label) {
+    el.play().catch(err => {
+      console.warn(`[WebRTC] ${label}.play() blocked:`, err.name, err.message)
+    })
+  }
+
+  pc.onicecandidate = event => {
+    if (event.candidate) {
+      sendCallSignal({
+        type: 'call_ice',
+        candidate: event.candidate.toJSON()
+      })
+    }
+  }
+
+  pc.ontrack = event => {
+    const { track } = event
+    const isAudio = track.kind === 'audio'
+    const stream = isAudio ? remoteAudioStream : remoteVideoStream
+    const el = isAudio ? remoteAudio : remoteVideo
+
+    console.log('[WebRTC] ontrack:', track.kind, track.id, 'muted:', track.muted)
+
+    // Add track to the right stream (idempotent)
+    if (!stream.getTracks().includes(track)) {
+      stream.addTrack(track)
+    }
+
+    // Kick playback immediately — may be silent until ICE connects
+    tryPlay(el, isAudio ? 'remoteAudio' : 'remoteVideo')
+
+    // Also (re-)play when track goes live after ICE connects
+    // Use addEventListener so multiple tracks don't stomp each other's handler
+    track.addEventListener('unmute', () => {
+      console.log('[WebRTC] track unmuted:', track.kind, track.id)
+      tryPlay(el, isAudio ? 'remoteAudio' : 'remoteVideo')
+      if (!isAudio) {
+        $('remotePlaceholder').classList.add('hidden')
+      }
+      setCallStatus('Live')
+    })
+
+    if (!isAudio) {
+      $('remotePlaceholder').classList.add('hidden')
+    }
+    setCallStatus('Live')
+  }
+
+  pc.onconnectionstatechange = () => {
+    console.log('[WebRTC] connectionState:', pc.connectionState)
+    if (pc.connectionState === 'connected') {
+      setCallStatus('Live')
+      // Ensure both elements are playing when fully connected
+      tryPlay(remoteAudio, 'remoteAudio')
+      tryPlay(remoteVideo, 'remoteVideo')
+    }
+
+    if (
+      pc.connectionState === 'disconnected' ||
+      pc.connectionState === 'failed' ||
+      pc.connectionState === 'closed'
+    ) {
+      if (call.inCall) {
+        endCall()
+      }
+    }
+  }
+
+  pc.onicegatheringstatechange = () => {
+    console.log('[WebRTC] iceGatheringState:', pc.iceGatheringState)
+  }
+
+  pc.oniceconnectionstatechange = () => {
+    console.log('[WebRTC] iceConnectionState:', pc.iceConnectionState)
+    // Start recording once media is actually flowing
+    if (
+      (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') &&
+      !call.recording
+    ) {
+      logCallEvent('Call connected (ICE)', { peer: call.peerName })
+      startCallRecording()
+    }
+    if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+      logCallEvent('Connection issue', { state: pc.iceConnectionState })
+    }
+  }
+
+  return pc
+}
+
+
+
+function createAvatarVideoTrack(name) {
+  const canvas = document.createElement('canvas')
+  canvas.width = 640
+  canvas.height = 480
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+
+  let step = 0
+  const userInitials = initials(name || 'You')
+  const displayName = name || 'You'
+
+  function draw() {
+    step++
+    const bgGrad = ctx.createRadialGradient(320, 240, 40, 320, 240, 380)
+    bgGrad.addColorStop(0, '#1e2538')
+    bgGrad.addColorStop(1, '#0c1017')
+    ctx.fillStyle = bgGrad
+    ctx.fillRect(0, 0, 640, 480)
+
+    const pulse = Math.sin(step * 0.08) * 5
+    const glowRadius = 78 + pulse
+    ctx.beginPath()
+    ctx.arc(320, 200, glowRadius + 14, 0, Math.PI * 2)
+    ctx.fillStyle = 'rgba(99, 102, 241, 0.22)'
+    ctx.fill()
+
+    const avatarGrad = ctx.createLinearGradient(240, 120, 400, 280)
+    avatarGrad.addColorStop(0, '#6366f1')
+    avatarGrad.addColorStop(1, '#8b5cf6')
+    ctx.beginPath()
+    ctx.arc(320, 200, 78, 0, Math.PI * 2)
+    ctx.fillStyle = avatarGrad
+    ctx.fill()
+    ctx.lineWidth = 3
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)'
+    ctx.stroke()
+
+    ctx.fillStyle = '#ffffff'
+    ctx.font = 'bold 54px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillText(userInitials, 320, 200)
+
+    ctx.font = '600 18px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
+    ctx.fillStyle = '#f1f5f9'
+    ctx.fillText(displayName, 320, 305)
+
+    const pillW = 210
+    const pillH = 32
+    const pillX = 320 - pillW / 2
+    const pillY = 328
+    ctx.beginPath()
+    if (ctx.roundRect) {
+      ctx.roundRect(pillX, pillY, pillW, pillH, 16)
+    } else {
+      ctx.rect(pillX, pillY, pillW, pillH)
+    }
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.85)'
+    ctx.fill()
+    ctx.lineWidth = 1
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)'
+    ctx.stroke()
+
+    ctx.font = '500 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
+    ctx.fillStyle = '#94a3b8'
+    ctx.fillText('📷 Camera Not Detected', 320, pillY + 16)
+  }
+
+  draw()
+  const intervalId = setInterval(draw, 100)
+  const stream = canvas.captureStream ? canvas.captureStream(10) : (canvas.mozCaptureStream ? canvas.mozCaptureStream(10) : null)
+  if (!stream) return null
+
+  const track = stream.getVideoTracks()[0]
+  if (track) {
+    const origStop = track.stop.bind(track)
+    track.stop = () => {
+      clearInterval(intervalId)
+      origStop()
+    }
+  }
+  return track
+}
+
+
+function createSilentAudioTrack() {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext
+    if (!AudioCtx) return null
+    const ctx = new AudioCtx()
+    const osc = ctx.createOscillator()
+    const dst = ctx.createMediaStreamDestination()
+    osc.connect(dst)
+    osc.start()
+    const track = dst.stream.getAudioTracks()[0]
+    if (track) {
+      track.enabled = false
+      const origStop = track.stop.bind(track)
+      track.stop = () => {
+        try { osc.stop() } catch { }
+        try { ctx.close() } catch { }
+        origStop()
+      }
+      return track
+    }
+  } catch (err) {
+    console.warn('Could not create silent audio track:', err)
+  }
+  return null
+}
+
+
+async function getLocalStream() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw new Error('WebRTC media devices are not supported in this browser.')
+  }
+
+  // 1. Attempt standard capture: video (ideal user-facing) + audio
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'user' } },
+      audio: true
+    })
+    call.isAvatarFallback = false
+    return stream
+  } catch (err) {
+    console.warn('Full getUserMedia (video+audio) failed:', err.name, err.message)
+    if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+      throw new Error('Microphone or camera permission was denied in your browser settings.')
+    }
+  }
+
+  // 2. Attempt basic video + audio without constraints
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: true,
+      audio: true
+    })
+    call.isAvatarFallback = false
+    return stream
+  } catch (err) {
+    console.warn('Basic getUserMedia (video+audio) failed:', err.name, err.message)
+    if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+      throw new Error('Microphone or camera permission was denied in your browser settings.')
+    }
+  }
+
+  // 3. Fallback: probe audio and video separately
+  let audioTrack = null
+  let videoTrack = null
+  let audioErr = null
+  let videoErr = null
+
+  try {
+    const aStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    audioTrack = aStream.getAudioTracks()[0]
+  } catch (e) {
+    audioErr = e
+    console.warn('Microphone capture failed:', e.name, e.message)
+    if (e.name === 'NotAllowedError' || e.name === 'PermissionDeniedError') {
+      throw new Error('Microphone permission denied. Please allow microphone access.')
+    }
+  }
+
+  try {
+    const vStream = await navigator.mediaDevices.getUserMedia({ video: true })
+    videoTrack = vStream.getVideoTracks()[0]
+  } catch (e) {
+    videoErr = e
+    console.warn('Video capture failed:', e.name, e.message)
+  }
+
+  // If neither physical device is available
+  if (!audioTrack && !videoTrack) {
+    if (
+      (audioErr?.name === 'NotAllowedError' || audioErr?.name === 'PermissionDeniedError') ||
+      (videoErr?.name === 'NotAllowedError' || videoErr?.name === 'PermissionDeniedError')
+    ) {
+      throw new Error('Device permission was denied. Please allow access in browser settings.')
+    }
+
+    const fallbackVideo = createAvatarVideoTrack(state.session?.username || 'You')
+    const fallbackAudio = createSilentAudioTrack()
+    if (fallbackVideo && fallbackAudio) {
+      call.isAvatarFallback = true
+      showToast('⚠️ No camera or mic found. Connecting in preview mode.', 4500)
+      return new MediaStream([fallbackAudio, fallbackVideo])
+    }
+    throw new Error('No camera or microphone found on your computer. Please connect a device.')
+  }
+
+  const combined = new MediaStream()
+
+  if (audioTrack) {
+    combined.addTrack(audioTrack)
+  } else {
+    const silent = createSilentAudioTrack()
+    if (silent) combined.addTrack(silent)
+    showToast('⚠️ No microphone found. Call started with video only.', 4000)
+  }
+
+  if (videoTrack) {
+    call.isAvatarFallback = false
+    combined.addTrack(videoTrack)
+  } else {
+    call.isAvatarFallback = true
+    const avatarTrack = createAvatarVideoTrack(state.session?.username || 'You')
+    if (avatarTrack) {
+      combined.addTrack(avatarTrack)
+    }
+    showToast('ℹ️ No camera found. Call started with microphone & avatar.', 4000)
+  }
+
+  return combined
+}
+
+
+async function attachLocalMedia(pc) {
+  call.localStream = await getLocalStream()
+  $('localVideo').srcObject = call.localStream
+  $('localVideo').classList.toggle('unmirrored', Boolean(call.isAvatarFallback))
+  call.localStream.getTracks().forEach(track => {
+    pc.addTrack(track, call.localStream)
+  })
+}
+
+
+async function handleCallSignal(data) {
+  if (!CALL_TYPES.has(data.type)) {
+    return false
+  }
+
+  if (data.type === 'call_offer') {
+    if (call.inCall) {
+      sendCallSignal({
+        type: 'call_reject',
+        target_id: data.sender_id
+      })
+      return true
+    }
+
+    if (call.incomingOffer) {
+      return true
+    }
+
+    call.incomingOffer = data.sdp
+    call.peerId = data.sender_id
+    call.peerName = callerName(data.sender_id)
+
+    $('incomingCallName').textContent = call.peerName
+    $('incomingCallAvatar').textContent = initials(call.peerName)
+    $('incomingCallModal').classList.remove('hidden')
+    return true
+  }
+
+  if (data.type === 'call_answer') {
+    if (
+      call.pc &&
+      data.sdp &&
+      call.pc.signalingState === 'have-local-offer'
+    ) {
+      await call.pc.setRemoteDescription({
+        type: 'answer',
+        sdp: data.sdp
+      })
+      await flushIce()
+      setCallStatus('Connecting…')
+    }
+    return true
+  }
+
+  if (data.type === 'call_ice') {
+    if (!data.candidate) {
+      return true
+    }
+
+    if (call.pc && call.pc.remoteDescription) {
+      try {
+        await call.pc.addIceCandidate(data.candidate)
+      } catch { }
+    } else {
+      call.pendingIce.push(data.candidate)
+    }
+    return true
+  }
+
+  if (data.type === 'call_reject' || data.type === 'call_end') {
+    const wasIncoming = Boolean(call.incomingOffer)
+    endCall()
+    if (data.type === 'call_reject' && wasIncoming === false) {
+      showToast('Call declined', 3000)
+    }
+    return true
+  }
+
+  return true
+}
+
+
+async function startOutgoingCall() {
+  if (!state.selected || call.inCall) {
+    return
+  }
+
+  try {
+    call.peerId = state.selected.id
+    call.peerName = state.selected.username
+    call.pendingIce = []
+
+    const pc = createPeerConnection()
+    await attachLocalMedia(pc)
+
+    // Don't use deprecated offerToReceive* flags — tracks added via
+    // addTrack already negotiate sendrecv direction automatically
+    const offer = await pc.createOffer()
+    await pc.setLocalDescription(offer)
+
+    console.log('[WebRTC] Sending offer, local tracks:',
+      pc.getSenders().map(s => s.track?.kind))
+
+    sendCallSignal({
+      type: 'call_offer',
+      sdp: pc.localDescription.sdp,
+      target_id: call.peerId
+    })
+
+    call.inCall = true
+    showCallStage(call.peerName, `Calling ${call.peerName}…`)
+  } catch (error) {
+    endCall()
+    showToast(`❌ ${error.message}`, 4000)
+  }
+}
+
+
+document.querySelectorAll('[data-video-call]').forEach(button => {
+  button.addEventListener('click', startOutgoingCall)
+})
+
+
+$('acceptCallBtn').addEventListener('click', async () => {
+  try {
+    $('incomingCallModal').classList.add('hidden')
+
+    const pc = createPeerConnection()
+
+    await pc.setRemoteDescription({
+      type: 'offer',
+      sdp: call.incomingOffer
+    })
+    await flushIce()
+
+    // Now add local media after remote description is set
+    await attachLocalMedia(pc)
+
+    const answer = await pc.createAnswer()
+    await pc.setLocalDescription(answer)
+
+    console.log('[WebRTC] Sending answer, local tracks:',
+      pc.getSenders().map(s => s.track?.kind))
+
+    sendCallSignal({
+      type: 'call_answer',
+      sdp: pc.localDescription.sdp,
+      target_id: call.peerId
+    })
+
+    call.inCall = true
+    call.incomingOffer = null
+    showCallStage(call.peerName, 'Connecting…')
+  } catch (error) {
+    endCall()
+    showToast(`❌ ${error.message}`, 4000)
+  }
+})
+
+
+$('rejectCallBtn').addEventListener('click', () => {
+  sendCallSignal({
+    type: 'call_reject',
+    target_id: call.peerId
+  })
+  call.incomingOffer = null
+  $('incomingCallModal').classList.add('hidden')
+})
+
+
+$('muteBtn').addEventListener('click', () => {
+  const track = call.localStream?.getAudioTracks()[0]
+  if (!track) {
+    return
+  }
+
+  track.enabled = !track.enabled
+  $('muteBtn').classList.toggle('active', !track.enabled)
+  setControlLabel($('muteBtn'), track.enabled ? 'Mute' : 'Unmute')
+  logCallEvent(track.enabled ? 'Microphone unmuted' : 'Microphone muted')
+})
+
+
+$('cameraBtn').addEventListener('click', () => {
+  const track = call.localStream?.getVideoTracks()[0]
+  if (!track) {
+    return
+  }
+
+  track.enabled = !track.enabled
+  $('cameraBtn').classList.toggle('active', !track.enabled)
+  setControlLabel($('cameraBtn'), track.enabled ? 'Camera' : 'Camera On')
+  logCallEvent(track.enabled ? 'Camera enabled' : 'Camera disabled')
+})
+
+
+$('endCallBtn').addEventListener('click', () => {
+  sendCallSignal({
+    type: 'call_end',
+    target_id: call.peerId
+  })
+  endCall()
+})
+
+
+// ── Call Recording & Transcription ─────────────────────────────────
+
+function bestMimeType() {
+  const candidates = [
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/ogg;codecs=opus',
+    'audio/ogg',
+    'audio/mp4'
+  ]
+  return candidates.find(m => MediaRecorder.isTypeSupported(m)) || ''
+}
+
+function startCallRecording() {
+  if (call.recording) return
+
+  const mime = bestMimeType()
+  call.localChunks = []
+  call.remoteChunks = []
+  call.callStartTime = new Date().toISOString()
+  call.recording = true
+
+  logCallEvent('Recording started')
+  logCallEvent('Participant joined', { participant: state.session?.username })
+  logCallEvent('Participant joined', { participant: call.peerName })
+
+  // Record local microphone
+  if (call.localStream) {
+    const localAudio = new MediaStream(call.localStream.getAudioTracks())
+    if (localAudio.getTracks().length) {
+      try {
+        call.localRecorder = new MediaRecorder(localAudio, mime ? { mimeType: mime } : {})
+        call.localRecorder.ondataavailable = e => {
+          if (e.data && e.data.size > 0) call.localChunks.push(e.data)
+        }
+        call.localRecorder.start(1000)
+        console.log('[Recording] Local audio recorder started')
+      } catch (e) {
+        console.warn('[Recording] Local recorder failed:', e)
+      }
+    }
+  }
+
+  // Record remote audio from the <audio> element's srcObject
+  const remoteAudioEl = $('remoteAudio')
+  if (remoteAudioEl && remoteAudioEl.srcObject) {
+    const remoteStream = new MediaStream(
+      remoteAudioEl.srcObject.getAudioTracks()
+    )
+    if (remoteStream.getTracks().length) {
+      try {
+        call.remoteRecorder = new MediaRecorder(remoteStream, mime ? { mimeType: mime } : {})
+        call.remoteRecorder.ondataavailable = e => {
+          if (e.data && e.data.size > 0) call.remoteChunks.push(e.data)
+        }
+        call.remoteRecorder.start(1000)
+        console.log('[Recording] Remote audio recorder started')
+      } catch (e) {
+        console.warn('[Recording] Remote recorder failed:', e)
+      }
+    }
+  }
+}
+
+function stopRecorderAsync(recorder) {
+  return new Promise(resolve => {
+    if (!recorder || recorder.state === 'inactive') { resolve(); return }
+    recorder.onstop = () => resolve()
+    try { recorder.stop() } catch { resolve() }
+  })
+}
+
+/** Log a timestamped call event to be sent to n8n. */
+function logCallEvent(eventName, detail = {}) {
+  call.events.push({
+    time: new Date().toISOString(),
+    event: eventName,
+    participant: state.session?.username || 'Me',
+    ...detail
+  })
+  console.log('[Event]', eventName, detail)
+}
+
+async function submitCallSummary(peerName, startTime, localBlob, remoteBlob, events) {
+  if (!state.session) return
+
+  showToast('📝 Transcribing call…', 6000)
+
+  const fd = new FormData()
+  const mimeType = localBlob?.type || remoteBlob?.type || 'audio/webm'
+  const ext = mimeType.includes('ogg') ? 'ogg' : mimeType.includes('mp4') ? 'mp4' : 'webm'
+
+  if (localBlob && localBlob.size > 0) {
+    fd.append('local_audio', localBlob, `local.${ext}`)
+  }
+  if (remoteBlob && remoteBlob.size > 0) {
+    fd.append('remote_audio', remoteBlob, `remote.${ext}`)
+  }
+  fd.append('peer_name', peerName || 'Unknown')
+  fd.append('my_name', state.session?.username || 'Me')
+  fd.append('call_start', startTime || new Date().toISOString())
+  fd.append('call_end', new Date().toISOString())
+  // Send the event log as JSON string for n8n's important_events field
+  fd.append('call_events', JSON.stringify(events || []))
+
+  try {
+    const res = await fetch('/api/call-summary', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${state.session.access_token}` },
+      body: fd
+    })
+    if (res.ok) {
+      showToast('✅ Call summary sent to n8n!', 4000)
+    } else {
+      const err = await res.json().catch(() => ({}))
+      showToast(`⚠️ Summary failed: ${err.detail || res.status}`, 5000)
+    }
+  } catch (e) {
+    console.error('[Summary] Failed:', e)
+    showToast('⚠️ Could not send call summary.', 4000)
+  }
+}
+
+
+function endCall() {
+  const pc = call.pc
+  call.pc = null
+  call.inCall = false
+
+  if (pc) {
+    pc.close()
+  }
+
+  // Snapshot recording state before resetting
+  const wasRecording = call.recording
+  const localRecorder = call.localRecorder
+  const remoteRecorder = call.remoteRecorder
+  const localChunks = call.localChunks
+  const remoteChunks = call.remoteChunks
+  const callStartTime = call.callStartTime
+  const peerName = call.peerName
+  const callEvents = [...call.events]  // snapshot before reset
+
+  if (call.localStream) {
+    call.localStream.getTracks().forEach(track => track.stop())
+    call.localStream = null
+  }
+
+  $('remoteAudio').srcObject = null
+  $('remoteVideo').srcObject = null
+  $('localVideo').srcObject = null
+  $('localVideo').classList.remove('unmirrored')
+  $('remotePlaceholder').classList.remove('hidden')
+  setCallButtonsBusy(false)
+  $('muteBtn').classList.remove('active')
+  $('cameraBtn').classList.remove('active')
+  setControlLabel($('muteBtn'), 'Mute')
+  setControlLabel($('cameraBtn'), 'Camera')
+
+  call.inCall = false
+  call.incomingOffer = null
+  call.peerId = null
+  call.peerName = ''
+  call.pendingIce = []
+  call.isAvatarFallback = false
+  call.localRecorder = null
+  call.remoteRecorder = null
+  call.localChunks = []
+  call.remoteChunks = []
+  call.callStartTime = null
+  call.recording = false
+  call.events = []
+
+  $('videoModal').classList.add('hidden')
+  $('incomingCallModal').classList.add('hidden')
+
+  // Transcribe & summarise asynchronously after call ends
+  if (wasRecording) {
+    logCallEvent && callEvents.push({
+      time: new Date().toISOString(),
+      event: 'Call ended',
+      participant: state.session?.username || 'Me'
+    })
+    Promise.all([
+      stopRecorderAsync(localRecorder),
+      stopRecorderAsync(remoteRecorder)
+    ]).then(() => {
+      const localBlob = localChunks.length
+        ? new Blob(localChunks, { type: localChunks[0]?.type || 'audio/webm' })
+        : null
+      const remoteBlob = remoteChunks.length
+        ? new Blob(remoteChunks, { type: remoteChunks[0]?.type || 'audio/webm' })
+        : null
+
+      if (localBlob || remoteBlob) {
+        submitCallSummary(peerName, callStartTime, localBlob, remoteBlob, callEvents)
+      } else {
+        console.log('[Recording] No audio captured, skipping summary.')
+      }
+    })
+  }
 }
