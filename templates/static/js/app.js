@@ -57,36 +57,261 @@ async function request(url, options = {}) {
 }
 
 
-async function authenticate(path) {
-  const response = await fetch(path, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      username: $('username').value,
-      password: $('password').value
-    })
-  })
+function setAuthMode(mode) {
+  const signupCard = $('signupCard')
+  const loginCard = $('loginCard')
+  const signupError = $('signupError')
+  const loginError = $('loginError')
+  const otpStatus = $('otpStatus')
 
-  const data = await response.json()
-
-  if (!response.ok) {
-
-    if (
-      path === '/register' &&
-      response.status === 409
-    ) {
-      throw new Error(
-        'This username already exists. Use Sign in instead.'
-      )
-    }
-
-    throw new Error(
-      data.detail || 'Authentication failed'
-    )
+  if (signupError) signupError.textContent = ''
+  if (loginError) loginError.textContent = ''
+  if (otpStatus) {
+    otpStatus.textContent = ''
+    otpStatus.classList.add('hidden')
   }
 
+  if (mode === 'login') {
+    if (signupCard) signupCard.classList.add('hidden')
+    if (loginCard) {
+      loginCard.classList.remove('hidden')
+      loginCard.classList.remove('card-animate')
+      void loginCard.offsetWidth
+      loginCard.classList.add('card-animate')
+    }
+    const loginEmail = $('loginEmail')
+    if (loginEmail) loginEmail.focus()
+  } else {
+    if (loginCard) loginCard.classList.add('hidden')
+    if (signupCard) {
+      signupCard.classList.remove('hidden')
+      signupCard.classList.remove('card-animate')
+      void signupCard.offsetWidth
+      signupCard.classList.add('card-animate')
+    }
+    const signupUsername = $('signupUsername')
+    if (signupUsername) signupUsername.focus()
+  }
+}
+
+let otpCooldownTimer = null
+
+async function sendOtp() {
+  const emailInput = $('signupEmail')
+  const email = emailInput ? emailInput.value.trim() : ''
+  const statusEl = $('otpStatus')
+  const errorEl = $('signupError')
+  const sendBtn = $('sendOtpBtn')
+
+  if (errorEl) errorEl.textContent = ''
+  if (statusEl) {
+    statusEl.textContent = ''
+    statusEl.classList.add('hidden')
+  }
+
+  if (!email || !email.includes('@')) {
+    if (errorEl) errorEl.textContent = 'Please enter a valid Gmail / Email address first.'
+    if (emailInput) emailInput.focus()
+    return
+  }
+
+  try {
+    if (sendBtn) {
+      sendBtn.disabled = true
+      sendBtn.textContent = 'Sending...'
+    }
+
+    const response = await fetch('/auth/send-otp', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ email })
+    })
+
+    const data = await response.json()
+
+    if (!response.ok) {
+      throw new Error(data.detail || 'Failed to send OTP')
+    }
+
+    if (statusEl) {
+      statusEl.innerHTML = `✉️ Verification email sent to <strong>${email}</strong>! Please check your Gmail/inbox for your 6-digit code.`
+      statusEl.className = 'status-msg status-success'
+      statusEl.classList.remove('hidden')
+    }
+
+    const otpInput = $('signupOtp')
+    if (otpInput) {
+      otpInput.value = ''
+      otpInput.focus()
+    }
+
+    // 60-second cooldown
+    let cooldown = 60
+    if (sendBtn) sendBtn.textContent = `Resend (${cooldown}s)`
+    if (otpCooldownTimer) clearInterval(otpCooldownTimer)
+    otpCooldownTimer = setInterval(() => {
+      cooldown--
+      if (cooldown <= 0) {
+        clearInterval(otpCooldownTimer)
+        if (sendBtn) {
+          sendBtn.disabled = false
+          sendBtn.textContent = 'Send OTP'
+        }
+      } else {
+        if (sendBtn) sendBtn.textContent = `Resend (${cooldown}s)`
+      }
+    }, 1000)
+  } catch (err) {
+    if (sendBtn) {
+      sendBtn.disabled = false
+      sendBtn.textContent = 'Send OTP'
+    }
+    if (errorEl) errorEl.textContent = err.message
+  }
+}
+
+async function handleSignup(event) {
+  event.preventDefault()
+  const errorEl = $('signupError')
+  if (errorEl) errorEl.textContent = ''
+
+  const username = $('signupUsername').value.trim()
+  const email = $('signupEmail').value.trim()
+  const otp = $('signupOtp').value.trim()
+  const password = $('signupPassword').value
+
+  if (!username) {
+    if (errorEl) errorEl.textContent = 'Username is required.'
+    return
+  }
+  if (!email) {
+    if (errorEl) errorEl.textContent = 'Email is required.'
+    return
+  }
+  if (!otp || otp.length !== 6) {
+    if (errorEl) errorEl.textContent = 'Please enter the 6-digit OTP sent to your email.'
+    return
+  }
+  if (password.length < 6) {
+    if (errorEl) errorEl.textContent = 'Password must be at least 6 characters.'
+    return
+  }
+
+  const submitBtn = $('signupSubmitBtn')
+  try {
+    if (submitBtn) {
+      submitBtn.disabled = true
+      submitBtn.textContent = 'Creating account...'
+    }
+
+    const response = await fetch('/register', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        username,
+        email,
+        password,
+        otp
+      })
+    })
+
+    const data = await response.json()
+
+    if (!response.ok) {
+      if (response.status === 409) {
+        throw new Error(data.detail || 'This username or email is already registered.')
+      }
+      throw new Error(data.detail || 'Sign up failed')
+    }
+
+    completeSession(data)
+  } catch (err) {
+    if (errorEl) errorEl.textContent = err.message
+  } finally {
+    if (submitBtn) {
+      submitBtn.disabled = false
+      submitBtn.innerHTML = 'Create account <span>→</span>'
+    }
+  }
+}
+
+async function handleLogin(event) {
+  event.preventDefault()
+  const errorEl = $('loginError')
+  if (errorEl) errorEl.textContent = ''
+
+  const email = $('loginEmail').value.trim()
+  const password = $('loginPassword').value
+
+  if (!email) {
+    if (errorEl) errorEl.textContent = 'Gmail / Email is required.'
+    return
+  }
+  if (!password) {
+    if (errorEl) errorEl.textContent = 'Password is required.'
+    return
+  }
+
+  const submitBtn = $('loginSubmitBtn')
+  try {
+    if (submitBtn) {
+      submitBtn.disabled = true
+      submitBtn.textContent = 'Signing in...'
+    }
+
+    const response = await fetch('/login', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        email,
+        password
+      })
+    })
+
+    const data = await response.json()
+
+    if (!response.ok) {
+      throw new Error(data.detail || 'Invalid email or password')
+    }
+
+    completeSession(data)
+  } catch (err) {
+    if (errorEl) errorEl.textContent = err.message
+  } finally {
+    if (submitBtn) {
+      submitBtn.disabled = false
+      submitBtn.innerHTML = 'Sign in <span>→</span>'
+    }
+  }
+}
+
+function cleanDisplayName(name) {
+  if (!name) return ''
+  const trimmed = name.trim()
+  return trimmed.includes('@') ? trimmed.split('@')[0] : trimmed
+}
+
+function updateProfileUI(user) {
+  if (!user) return
+  const displayName = cleanDisplayName(user.username)
+  if ($('profileName')) {
+    $('profileName').textContent = displayName
+  }
+  if ($('profileInitial')) {
+    $('profileInitial').textContent = initials(displayName)
+  }
+  if ($('profileEmail')) {
+    $('profileEmail').textContent = user.email || ''
+  }
+}
+
+function completeSession(data) {
   state.session = data
 
   localStorage.setItem(
@@ -95,43 +320,17 @@ async function authenticate(path) {
   )
 
   setView(true)
-
-  $('profileName').textContent =
-    data.username
+  updateProfileUI(data)
 
   connectSignal()
-  await loadUsers()
+  loadUsers()
 }
 
-
-$('authForm').addEventListener(
-  'submit',
-  event => {
-
-    event.preventDefault()
-
-    authenticate('/login').catch(
-      error => {
-        $('authError').textContent =
-          error.message
-      }
-    )
-  }
-)
-
-
-$('registerButton').addEventListener(
-  'click',
-  () => {
-
-    authenticate('/register').catch(
-      error => {
-        $('authError').textContent =
-          error.message
-      }
-    )
-  }
-)
+$('signupCard')?.addEventListener('submit', handleSignup)
+$('loginCard')?.addEventListener('submit', handleLogin)
+$('sendOtpBtn')?.addEventListener('click', sendOtp)
+$('switchToLoginBtn')?.addEventListener('click', () => setAuthMode('login'))
+$('switchToSignupBtn')?.addEventListener('click', () => setAuthMode('signup'))
 
 
 $('logoutButton').addEventListener(
@@ -258,6 +457,15 @@ $('userSearch').addEventListener(
   }
 )
 
+const newChatBtn = $('newChatBtn')
+if (newChatBtn) {
+  newChatBtn.addEventListener('click', () => {
+    const searchInput = $('userSearch')
+    searchInput.focus()
+    showToast('🔍 Type a username to find and start a new conversation', 3000)
+  })
+}
+
 
 /* ============================================================
    CONVERSATION
@@ -267,6 +475,12 @@ async function openConversation(user) {
 
   if (state.socket) {
     state.socket.close()
+  }
+
+  // Clear search field after selecting a user to restore active conversations view
+  if ($('userSearch').value) {
+    $('userSearch').value = ''
+    loadUsers().catch(() => { })
   }
 
   state.selected =
@@ -418,7 +632,7 @@ function renderMessage(message) {
     ? `<div class="bubble-row">
          <div class="bubble"></div>
        </div>
-       <time>${date}</time>`
+       <time>${date} <span class="delivered-tick" title="Delivered">✓✓</span></time>`
     : `<div class="bubble-row">
          <div class="person-avatar mini">${peerInitials}</div>
          <div class="bubble"></div>
@@ -430,11 +644,12 @@ function renderMessage(message) {
     .textContent =
     message.content
 
-  $('messages')
-    .appendChild(article)
-
-  $('messages').scrollTop =
-    $('messages').scrollHeight
+  const msgContainer = $('messages')
+  msgContainer.appendChild(article)
+  msgContainer.scrollTo({
+    top: msgContainer.scrollHeight,
+    behavior: 'smooth'
+  })
 }
 
 
@@ -478,6 +693,10 @@ const voice = {
 
   state: 'idle',
 
+  action: 'send_message',
+
+  callType: 'unspecified',
+
   selectedUser: null,
 
   pendingMessage: null,
@@ -490,7 +709,9 @@ const voice = {
 
   awaitingUserSelection: false,
 
-  awaitingConfirmation: false
+  awaitingConfirmation: false,
+
+  awaitingCallSelection: false
 }
 
 
@@ -681,21 +902,29 @@ function showToast(
 
 function vShowStep(n) {
 
-  [
+  const stepIds = [
     'vStep1',
     'vStep2',
     'vStep3',
-    'vStep4'
-  ].forEach(
-    (id, index) => {
+    'vStep4',
+    'vStepCallOptions'
+  ]
 
-      $(id).classList.toggle(
-        'hidden',
-        index !== n - 1
-      )
+  stepIds.forEach(
+    id => {
+      const el = $(id)
+      if (!el) return
+
+      if (n === 'call_options' || n === 5) {
+        el.classList.toggle('hidden', id !== 'vStepCallOptions')
+      } else {
+        const targetId = `vStep${n}`
+        el.classList.toggle('hidden', id !== targetId)
+      }
     }
   )
 
+  const activeDotNum = (n === 'call_options' || n === 5) ? 3 : (Number(n) || 1)
 
   for (
     let i = 1;
@@ -706,15 +935,17 @@ function vShowStep(n) {
     const dot =
       $(`vDot${i}`)
 
-    dot.classList.toggle(
-      'active',
-      i <= n
-    )
+    if (dot) {
+      dot.classList.toggle(
+        'active',
+        i <= activeDotNum
+      )
 
-    dot.classList.toggle(
-      'done',
-      i < n
-    )
+      dot.classList.toggle(
+        'done',
+        i < activeDotNum
+      )
+    }
   }
 
 
@@ -724,11 +955,13 @@ function vShowStep(n) {
     i++
   ) {
 
-    $(`vLine${i}`)
-      .classList.toggle(
+    const line = $(`vLine${i}`)
+    if (line) {
+      line.classList.toggle(
         'active',
-        i < n
+        i < activeDotNum
       )
+    }
   }
 }
 
@@ -737,6 +970,12 @@ function resetVoiceState() {
 
   voice.state =
     'idle'
+
+  voice.action =
+    'send_message'
+
+  voice.callType =
+    'unspecified'
 
   voice.selectedUser =
     null
@@ -757,6 +996,9 @@ function resetVoiceState() {
     false
 
   voice.awaitingConfirmation =
+    false
+
+  voice.awaitingCallSelection =
     false
 }
 
@@ -1193,6 +1435,14 @@ $('vRecordBtn')
           data.transcribed_text ||
           ''
 
+        voice.action =
+          data.action ||
+          'send_message'
+
+        voice.callType =
+          data.call_type ||
+          'unspecified'
+
 
         /*
         ========================================================
@@ -1244,6 +1494,12 @@ $('vRecordBtn')
 
           voice.awaitingUserSelection =
             true
+
+          voice.action =
+            data.action || 'send_message'
+
+          voice.callType =
+            data.call_type || 'unspecified'
 
           voice.receiverName =
             data.receiver || ''
@@ -1394,7 +1650,39 @@ $('vRecordBtn')
 
         /*
         ========================================================
-        SINGLE USER / DIRECT CONFIRMATION
+        CALL OPTIONS (SINGLE USER CALL MATCH)
+        ========================================================
+        */
+
+        if (
+          data.stage ===
+          'call_options' ||
+          (data.action === 'call_user' && data.selected_user)
+        ) {
+
+          voice.selectedUser =
+            data.selected_user
+
+          voice.receiverName =
+            data.receiver ||
+            data.selected_user?.username
+
+          voice.callType =
+            data.call_type || 'unspecified'
+
+          await showCallOptions(
+            data.selected_user,
+            voice.callType,
+            data.tts_audio
+          )
+
+          return
+        }
+
+
+        /*
+        ========================================================
+        SINGLE USER / DIRECT CONFIRMATION (MESSAGE)
         ========================================================
         */
 
@@ -1742,8 +2030,24 @@ async function selectVoiceUser(
 
   console.log(
     'SELECTED USER:',
-    user
+    user,
+    'ACTION:',
+    voice.action
   )
+
+
+  /*
+  ============================================================
+  CALL ACTION
+  ============================================================
+  */
+  if (voice.action === 'call_user') {
+    await showCallOptions(
+      user,
+      voice.callType || 'unspecified'
+    )
+    return
+  }
 
 
   /*
@@ -2368,6 +2672,190 @@ async function sendVoiceMessage() {
 
 
 /* ============================================================
+   CALL OPTIONS STEP & ACTIONS
+============================================================ */
+
+async function showCallOptions(user, callType = 'unspecified', ttsAudio = null) {
+  if (!user) return
+
+  stopRecording()
+
+  voice.state = 'waiting_for_call_choice'
+  voice.action = 'call_user'
+  voice.selectedUser = user
+  voice.receiverName = user.username
+  voice.callType = callType
+  voice.awaitingCallSelection = true
+
+  const targetEl = $('vCallTargetUser')
+  if (targetEl) {
+    targetEl.textContent = user.username
+  }
+
+  const statusEl = $('vCallStatus')
+  if (statusEl) {
+    statusEl.textContent = '🎤 Say "audio" or "video" or click above.'
+  }
+
+  // If user already specified direct audio or video call
+  if (callType === 'audio' || callType === 'video') {
+    await startCallToUser(user, callType)
+    return
+  }
+
+  // Otherwise show the interactive choice step
+  vShowStep('call_options')
+
+  const promptText = `I found ${user.username}. Would you like an audio call or a video call?`
+
+  if (ttsAudio) {
+    await playTtsAudio(ttsAudio)
+  } else {
+    await playPiperText(promptText)
+  }
+
+  // Listen for user voice response ("audio", "video", "voice", "cancel")
+  await listenForCallChoice()
+}
+
+
+async function listenForCallChoice() {
+  if (voice.state !== 'waiting_for_call_choice' || !voice.awaitingCallSelection) {
+    return
+  }
+
+  const statusEl = $('vCallStatus')
+  if (statusEl) {
+    statusEl.textContent = '🎤 Listening... Say "audio" or "video"'
+  }
+
+  try {
+    const blob = await record(7000)
+
+    if ($('voiceModal').classList.contains('hidden')) {
+      return
+    }
+
+    if (statusEl) {
+      statusEl.textContent = '⏳ Understanding call preference...'
+    }
+
+    const data = await postAudio('/api/voice-transcribe', blob)
+    const text = (data.text || '').toLowerCase()
+
+    console.log('CALL CHOICE HEARD:', text)
+
+    if (text.includes('video') || text.includes('camera') || text.includes('facetime')) {
+      await startCallToUser(voice.selectedUser, 'video')
+      return
+    }
+
+    if (text.includes('audio') || text.includes('voice') || text.includes('phone') || text.includes('call')) {
+      await startCallToUser(voice.selectedUser, 'audio')
+      return
+    }
+
+    if (text.includes('cancel') || text.includes('stop') || text.includes('no') || text.includes('close')) {
+      if (statusEl) statusEl.textContent = '❌ Call cancelled.'
+      await playPiperText('Call cancelled.')
+      setTimeout(() => { closeVoiceModal() }, 500)
+      return
+    }
+
+    // Unrecognized speech - prompt again
+    if (statusEl) {
+      statusEl.textContent = `❓ Heard "${text}". Please say "audio" or "video".`
+    }
+    await playPiperText('Please say audio call or video call.')
+    await listenForCallChoice()
+
+  } catch (error) {
+    console.error('Call choice error:', error)
+    if (statusEl) {
+      statusEl.textContent = `❌ ${error.message}`
+    }
+  }
+}
+
+
+async function startCallToUser(user, callType = 'video') {
+  if (!user) return
+
+  stopRecording()
+  voice.awaitingCallSelection = false
+
+  const statusEl = $('vCallStatus')
+  if (statusEl) {
+    statusEl.textContent = `📞 Starting ${callType} call with ${user.username}...`
+  }
+
+  await playPiperText(`Starting ${callType === 'audio' ? 'audio' : 'video'} call with ${user.username}.`)
+
+  closeVoiceModal()
+
+  // Open conversation with selected user and trigger WebRTC call
+  await openConversation(user)
+
+  // Start outgoing call
+  setTimeout(async () => {
+    try {
+      await startOutgoingCall()
+    } catch (err) {
+      console.error('Error starting outgoing call:', err)
+      showToast(`❌ Could not start call: ${err.message}`, 4000)
+    }
+  }, 300)
+}
+
+
+// Wire Call Option Step Buttons
+const vAudioBtn = $('vStartAudioCallBtn')
+if (vAudioBtn) {
+  vAudioBtn.addEventListener('click', async () => {
+    if (voice.selectedUser) {
+      await startCallToUser(voice.selectedUser, 'audio')
+    }
+  })
+}
+
+const vVideoBtn = $('vStartVideoCallBtn')
+if (vVideoBtn) {
+  vVideoBtn.addEventListener('click', async () => {
+    if (voice.selectedUser) {
+      await startCallToUser(voice.selectedUser, 'video')
+    }
+  })
+}
+
+const vCallBack = $('vCallBackBtn')
+if (vCallBack) {
+  vCallBack.addEventListener('click', () => {
+    stopRecording()
+    resetVoiceState()
+    vShowStep(1)
+    $('vStatus').textContent = ''
+  })
+}
+
+const vConfirmBtn = $('vConfirmBtn')
+if (vConfirmBtn) {
+  vConfirmBtn.addEventListener('click', async () => {
+    voice.awaitingConfirmation = false
+    voice.state = 'sending'
+    $('vConfirmStatus').textContent = '✅ Sending message...'
+    await sendVoiceMessage()
+  })
+}
+
+const vRetryBtn = $('vRetryBtn')
+if (vRetryBtn) {
+  vRetryBtn.addEventListener('click', () => {
+    closeVoiceModal()
+  })
+}
+
+
+/* ============================================================
    GLOBAL VOICE BUTTON
 ============================================================ */
 
@@ -2484,9 +2972,6 @@ async function sendViaSocket(
   message
 ) {
 
-  /*
-  Already connected to this user.
-  */
 
   if (
     state.selected?.id ===
@@ -2586,11 +3071,7 @@ async function sendViaSocket(
 if (state.session) {
 
   setView(true)
-
-  $('profileName')
-    .textContent =
-    state.session.username
-
+  updateProfileUI(state.session)
   connectSignal()
 
   loadUsers()
@@ -2630,6 +3111,7 @@ const call = {
   incomingOffer: null,
   peerId: null,
   peerName: '',
+  peerEmail: '',
   pendingIce: [],
   isAvatarFallback: false,
   // Recording state
@@ -2692,6 +3174,8 @@ function sendCallSignal(payload) {
   const targetId = payload.target_id || call.peerId
   const message = JSON.stringify({
     ...payload,
+    sender_username: state.session?.username || '',
+    sender_email: state.session?.email || '',
     target_id: targetId
   })
 
@@ -2712,11 +3196,21 @@ function sendCallSignal(payload) {
 }
 
 
-function callerName(userId) {
+function callerName(userId, fallbackUsername) {
   return (
+    fallbackUsername ||
     state.users.find(user => user.id === userId)?.username ||
     (state.selected?.id === userId ? state.selected.username : '') ||
     'Unknown'
+  )
+}
+
+function callerEmail(userId, fallbackEmail) {
+  return (
+    fallbackEmail ||
+    state.users.find(user => user.id === userId)?.email ||
+    (state.selected?.id === userId ? state.selected.email : '') ||
+    ''
   )
 }
 
@@ -3121,7 +3615,8 @@ async function handleCallSignal(data) {
 
     call.incomingOffer = data.sdp
     call.peerId = data.sender_id
-    call.peerName = callerName(data.sender_id)
+    call.peerName = callerName(data.sender_id, data.sender_username)
+    call.peerEmail = callerEmail(data.sender_id, data.sender_email)
 
     $('incomingCallName').textContent = call.peerName
     $('incomingCallAvatar').textContent = initials(call.peerName)
@@ -3135,6 +3630,12 @@ async function handleCallSignal(data) {
       data.sdp &&
       call.pc.signalingState === 'have-local-offer'
     ) {
+      if (data.sender_username && !call.peerName) {
+        call.peerName = data.sender_username
+      }
+      if (data.sender_email && !call.peerEmail) {
+        call.peerEmail = data.sender_email
+      }
       await call.pc.setRemoteDescription({
         type: 'answer',
         sdp: data.sdp
@@ -3181,13 +3682,12 @@ async function startOutgoingCall() {
   try {
     call.peerId = state.selected.id
     call.peerName = state.selected.username
+    call.peerEmail = state.selected.email || ''
     call.pendingIce = []
 
     const pc = createPeerConnection()
     await attachLocalMedia(pc)
 
-    // Don't use deprecated offerToReceive* flags — tracks added via
-    // addTrack already negotiate sendrecv direction automatically
     const offer = await pc.createOffer()
     await pc.setLocalDescription(offer)
 
@@ -3210,6 +3710,10 @@ async function startOutgoingCall() {
 
 
 document.querySelectorAll('[data-video-call]').forEach(button => {
+  button.addEventListener('click', startOutgoingCall)
+})
+
+document.querySelectorAll('[data-voice-call]').forEach(button => {
   button.addEventListener('click', startOutgoingCall)
 })
 
@@ -3379,11 +3883,56 @@ function logCallEvent(eventName, detail = {}) {
   console.log('[Event]', eventName, detail)
 }
 
-async function submitCallSummary(peerName, startTime, localBlob, remoteBlob, events) {
+function promptCallSummaryEmail(peerName, peerEmail, startTime, localBlob, remoteBlob, events) {
+  const myName = state.session?.username || 'Me'
+  const myEmail = state.session?.email || ''
+  const recName = peerName || 'Receiver'
+  const recEmail = peerEmail || (state.users.find(u => u.username === peerName)?.email) || ''
+
+  $('optReceiverName').textContent = recName
+  $('optReceiverEmail').textContent = recEmail ? `(${recEmail})` : '(No email set)'
+
+  $('optSenderName').textContent = `${myName} (Me)`
+  $('optSenderEmail').textContent = myEmail ? `(${myEmail})` : '(No email set)'
+
+  $('summaryEmailModal').classList.remove('hidden')
+
+  const handleSend = () => {
+    cleanup()
+    const selectedOpt = document.querySelector('input[name="summaryRecipient"]:checked')?.value || 'receiver'
+    let targetEmail = ''
+    if (selectedOpt === 'receiver') {
+      targetEmail = recEmail || myEmail
+    } else if (selectedOpt === 'sender') {
+      targetEmail = myEmail
+    } else if (selectedOpt === 'custom') {
+      targetEmail = $('optCustomEmailInput').value.trim() || myEmail
+    }
+
+    submitCallSummary(peerName, recEmail, targetEmail, startTime, localBlob, remoteBlob, events)
+  }
+
+  const handleSkip = () => {
+    cleanup()
+    showToast('Call summary skipped', 3000)
+  }
+
+  function cleanup() {
+    $('summaryEmailModal').classList.add('hidden')
+    $('summarySendBtn').removeEventListener('click', handleSend)
+    $('summaryCancelBtn').removeEventListener('click', handleSkip)
+  }
+
+  $('summarySendBtn').addEventListener('click', handleSend)
+  $('summaryCancelBtn').addEventListener('click', handleSkip)
+}
+
+async function submitCallSummary(peerName, peerEmail, targetEmail, startTime, localBlob, remoteBlob, events) {
   if (!state.session) return
 
   showToast('📝 Transcribing call…', 6000)
 
+  const myEmail = state.session?.email || ''
   const fd = new FormData()
   const mimeType = localBlob?.type || remoteBlob?.type || 'audio/webm'
   const ext = mimeType.includes('ogg') ? 'ogg' : mimeType.includes('mp4') ? 'mp4' : 'webm'
@@ -3396,6 +3945,9 @@ async function submitCallSummary(peerName, startTime, localBlob, remoteBlob, eve
   }
   fd.append('peer_name', peerName || 'Unknown')
   fd.append('my_name', state.session?.username || 'Me')
+  fd.append('caller_email', myEmail)
+  fd.append('receiver_email', peerEmail || '')
+  fd.append('target_email', targetEmail || peerEmail || myEmail)
   fd.append('call_start', startTime || new Date().toISOString())
   fd.append('call_end', new Date().toISOString())
   // Send the event log as JSON string for n8n's important_events field
@@ -3437,6 +3989,7 @@ function endCall() {
   const remoteChunks = call.remoteChunks
   const callStartTime = call.callStartTime
   const peerName = call.peerName
+  const peerEmail = call.peerEmail
   const callEvents = [...call.events]  // snapshot before reset
 
   if (call.localStream) {
@@ -3459,6 +4012,7 @@ function endCall() {
   call.incomingOffer = null
   call.peerId = null
   call.peerName = ''
+  call.peerEmail = ''
   call.pendingIce = []
   call.isAvatarFallback = false
   call.localRecorder = null
@@ -3491,7 +4045,7 @@ function endCall() {
         : null
 
       if (localBlob || remoteBlob) {
-        submitCallSummary(peerName, callStartTime, localBlob, remoteBlob, callEvents)
+        promptCallSummaryEmail(peerName, peerEmail, callStartTime, localBlob, remoteBlob, callEvents)
       } else {
         console.log('[Recording] No audio captured, skipping summary.')
       }

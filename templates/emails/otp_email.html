@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Your Verification Code - Relay</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #0e1116;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      color: #e8eaed;
+      -webkit-font-smoothing: antialiased;
+    }
+    .wrapper {
+      width: 100%;
+      table-layout: fixed;
+      background-color: #0e1116;
+      padding: 40px 0 60px 0;
+    }
+    .container {
+      max-width: 560px;
+      margin: 0 auto;
+      background: #1b1f26;
+      border: 1px solid #2d323a;
+      border-radius: 20px;
+      overflow: hidden;
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4);
+    }
+    .header {
+      padding: 36px 40px 24px 40px;
+      border-bottom: 1px solid #2d323a;
+      background: #15181e;
+    }
+    .brand-logo {
+      display: inline-block;
+      width: 36px;
+      height: 36px;
+      line-height: 36px;
+      text-align: center;
+      background: #8fd4d0;
+      color: #143534;
+      font-weight: 800;
+      font-size: 18px;
+      border-radius: 10px;
+      vertical-align: middle;
+      margin-right: 10px;
+    }
+    .brand-name {
+      display: inline-block;
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      color: #f4f6f8;
+      vertical-align: middle;
+    }
+    .kicker {
+      display: block;
+      margin-top: 14px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 1.5px;
+      color: #8fd4d0;
+      text-transform: uppercase;
+      font-family: 'SF Mono', Consolas, Monaco, monospace;
+    }
+    .content {
+      padding: 36px 40px;
+    }
+    h1 {
+      margin: 0 0 16px 0;
+      font-size: 24px;
+      font-weight: 700;
+      color: #f4f6f8;
+      line-height: 1.25;
+    }
+    p {
+      margin: 0 0 20px 0;
+      font-size: 15px;
+      line-height: 1.65;
+      color: #9aa3ae;
+    }
+    .otp-card {
+      margin: 30px 0;
+      padding: 24px 20px;
+      background: #12151a;
+      border: 1px dashed #8fd4d0;
+      border-radius: 14px;
+      text-align: center;
+    }
+    .otp-code {
+      display: inline-block;
+      font-family: 'SF Mono', 'Courier New', Courier, monospace;
+      font-size: 38px;
+      font-weight: 800;
+      letter-spacing: 12px;
+      color: #8fd4d0;
+      text-indent: 12px; /* balance letter spacing */
+    }
+    .otp-instruction {
+      margin-top: 10px;
+      font-size: 12px;
+      color: #717d8e;
+      letter-spacing: 0.5px;
+    }
+    .note-box {
+      background: #232832;
+      border-left: 3px solid #8fd4d0;
+      padding: 14px 18px;
+      border-radius: 0 8px 8px 0;
+      margin: 24px 0 0 0;
+    }
+    .note-box p {
+      margin: 0;
+      font-size: 13px;
+      color: #cbd5e1;
+      line-height: 1.5;
+    }
+    .footer {
+      padding: 24px 40px;
+      background: #15181e;
+      border-top: 1px solid #2d323a;
+      text-align: center;
+    }
+    .footer p {
+      margin: 0;
+      font-size: 12px;
+      color: #5a6575;
+      line-height: 1.5;
+    }
+    .footer a {
+      color: #8fd4d0;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <table class="container" cellpadding="0" cellspacing="0" width="100%">
+      <!-- Header -->
+      <tr>
+        <td class="header">
+          <div>
+            <span class="brand-logo">R</span>
+            <span class="brand-name">relay</span>
+          </div>
+          <span class="kicker">SECURE AUTHENTICATION</span>
+        </td>
+      </tr>
+
+      <!-- Content -->
+      <tr>
+        <td class="content">
+          <h1>Verification Code</h1>
+          <p>Hello,</p>
+          <p>
+            You requested a single-use verification code to create your account on <strong>Relay</strong>. Please enter the code below to complete your registration:
+          </p>
+
+          <div class="otp-card">
+            <div class="otp-code">{{ otp }}</div>
+            <div class="otp-instruction">Valid for 5 minutes • Do not share this code with anyone</div>
+          </div>
+
+          <div class="note-box">
+            <p>
+              <strong>Security reminder:</strong> Relay staff will never ask you for your verification code or password. If you did not initiate this request, you can safely ignore this email.
+            </p>
+          </div>
+        </td>
+      </tr>
+
+      <!-- Footer -->
+      <tr>
+        <td class="footer">
+          <p>© 2026 Relay Private Messaging. All rights reserved.</p>
+          <p style="margin-top: 6px;">Sent securely to {{ recipient_email }}</p>
+        </td>
+      </tr>
+    </table>
+  </div>
+</body>
+</html>

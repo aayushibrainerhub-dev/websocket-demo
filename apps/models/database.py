@@ -21,6 +21,8 @@ engine = create_async_engine(DATABASE_URL, connect_args=connect_args)
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
+from sqlalchemy import text
+
 async def init_db():
 
 	async with engine.begin() as connection:

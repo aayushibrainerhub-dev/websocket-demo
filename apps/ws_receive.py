@@ -1,3 +1,4 @@
+from requests import session
 import hashlib
 import hmac
 import json
@@ -13,9 +14,16 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from jose import JWTError, jwt
 from pydantic import BaseModel
-from sqlalchemy import select
-from apps.models.schemas import Credentials, MessageCreate
-
+import redis.asyncio as aioredis
+from sqlalchemy import select, func, case
+from apps.models.schemas import (
+    Credentials,
+    MessageCreate,
+    SendOtpRequest,
+    RegisterRequest,
+    LoginRequest,
+)
+import logging
 from apps.models.database import SessionLocal, lifespan
 from apps.models.model import Message, User
 from apps.ws_service import ConnectionManager
@@ -29,6 +37,10 @@ from apps.services.command_parser import parse_command
 from apps.services.tts import speak, generate_tts
 from fastapi.responses import Response
 from apps.services.confirmation import parse_confirmation
+from apps.services.email_service import send_otp_email
+
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(lifespan=lifespan)
 N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL", "")
@@ -44,6 +56,11 @@ app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "templates", "
 JWT_SECRET = os.getenv("JWT_SECRET", "development-only-change-this-secret")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_MINUTES = 60
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
+
+# WEBRTC signals needed for the video calls which is provided in built in websockets
+# TODO: implement webrtc signaling 
 CALL_SIGNAL_TYPES = {
     "call_offer",
     "call_answer",
@@ -67,23 +84,28 @@ def verify_password(password: str, stored_hash: str) -> bool:
     return hmac.compare_digest(digest.hex(), digest_hex)
 
 
-def validate_credentials(credentials: Credentials) -> str:
-    username = credentials.username.strip()
-    if len(username) < 2 or len(username) > 50:
-        raise HTTPException(400, "Username must be 2 to 50 characters")
-    if len(credentials.password) < 6:
-        raise HTTPException(400, "Password must contain at least 6 characters")
-    return username
+def format_username(name: str) -> str:
+    if not name:
+        return ""
+    if "@" in name:
+        return name.split("@")[0].strip()
+    return name.strip()
 
 
 async def create_session(user: User):
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=JWT_EXPIRE_MINUTES)
+    clean_username = format_username(user.username)
     token = jwt.encode(
-        {"sub": str(user.id), "username": user.username, "exp": expires_at},
+        {"sub": str(user.id), "username": clean_username, "exp": expires_at},
         JWT_SECRET,
         algorithm=JWT_ALGORITHM,
     )
-    return {"user_id": user.id, "username": user.username, "access_token": token}
+    return {
+        "user_id": user.id,
+        "username": clean_username,
+        "email": user.email,
+        "access_token": token,
+    }
 
 
 async def authenticated_user(authorization: str | None) -> User:
@@ -96,19 +118,99 @@ async def authenticated_user(authorization: str | None) -> User:
             raise HTTPException(401, "Invalid session")
         return user
 
+def validate_email(email: str) -> str:
+    clean_email = email.strip().lower()
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", clean_email):
+        raise HTTPException(400, "Invalid email address format")
+    return clean_email
 
-@app.post("/register")
-async def register(credentials: Credentials):
-    username = validate_credentials(credentials)
-    username_key = username.lower()
+
+def generate_otp() -> str:
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+@app.post("/auth/send-otp")
+# @app.post("/api/auth/send-otp")
+async def send_otp(request: SendOtpRequest):
+    email = validate_email(request.email)
     async with SessionLocal() as session:
         result = await session.execute(
-            select(User).where(User.username == username_key)
+            select(User).where(func.lower(User.email) == email)
         )
         if result.scalar_one_or_none() is not None:
+            raise HTTPException(400, "This email is already registered")
+
+    otp = generate_otp()
+    try:
+        # Store in Redis with 5-minute (300s) TTL
+        await redis_client.set(f"otp:{email}", otp, ex=300)
+    except Exception as e:
+        print(f"Redis error storing OTP: {e}")
+        raise HTTPException(500, "Failed to connect to Redis to store OTP")
+
+    print(f"[*] Generated OTP for {email}: {otp}")
+
+    # Send email using HTML template
+    try:
+        await send_otp_email(email, otp)
+    except Exception as e:
+        await redis_client.delete(f"otp:{email}")
+        print(f"[EMAIL SEND ERROR] {e}")
+        raise HTTPException(500, detail=str(e))
+
+    return {
+        "status": "success",
+        "message": f"Verification code sent to {email}. Please check your inbox.",
+    }
+
+
+@app.post("/register")
+async def register(request: RegisterRequest):
+    username = request.username.strip()
+    if "@" in username:
+        username = username.split("@")[0].strip()
+
+    if len(username) < 2 or len(username) > 50:
+        raise HTTPException(400, "Username must be 2 to 50 characters")
+    if len(request.password) < 6:
+        raise HTTPException(400, "Password must contain at least 6 characters")
+
+    email = validate_email(request.email)
+    otp = request.otp.strip() if request.otp else ""
+    if len(otp) != 6:
+        raise HTTPException(400, "Please enter a valid 6-digit OTP")
+
+    try:
+        stored_otp = await redis_client.get(f"otp:{email}")
+    except Exception as e:
+        print(f"Redis error checking OTP: {e}")
+        raise HTTPException(500, "OTP verification service unavailable")
+
+    if not stored_otp or stored_otp != otp:
+        raise HTTPException(400, "Invalid or expired OTP. Please try again.")
+
+    username_key = username.lower()
+    async with SessionLocal() as session:
+        result_user = await session.execute(
+            select(User).where(func.lower(User.username) == username_key)
+        )
+        if result_user.scalar_one_or_none() is not None:
             raise HTTPException(409, "Username is already registered")
 
-        user = User(username=username_key, password_hash=hash_password(credentials.password))
+        result_email = await session.execute(
+            select(User).where(func.lower(User.email) == email)
+        )
+        if result_email.scalar_one_or_none() is not None:
+            raise HTTPException(409, "Email is already registered")
+
+        # OTP verified, remove from Redis
+        await redis_client.delete(f"otp:{email}")
+
+        user = User(
+            username=username,
+            email=email,
+            password_hash=hash_password(request.password),
+        )
         session.add(user)
         await session.commit()
         await session.refresh(user)
@@ -116,13 +218,28 @@ async def register(credentials: Credentials):
 
 
 @app.post("/login")
-async def login(credentials: Credentials):
-    username = credentials.username.strip().lower()
+async def login(request: LoginRequest):
+    identifier = (request.email or request.username or "").strip().lower()
+    if not identifier:
+        raise HTTPException(400, "Email is required for login")
+    if not request.password:
+        raise HTTPException(400, "Password is required")
+
     async with SessionLocal() as session:
-        result = await session.execute(select(User).where(User.username == username))
+        result = await session.execute(
+            select(User).where(func.lower(User.email) == identifier)
+        )
         user = result.scalar_one_or_none()
-        if user is None or not verify_password(credentials.password, user.password_hash):
-            raise HTTPException(401, "Invalid username or password")
+
+        # Fallback to username for legacy accounts
+        if user is None:
+            result = await session.execute(
+                select(User).where(func.lower(User.username) == identifier)
+            )
+            user = result.scalar_one_or_none()
+
+        if user is None or not verify_password(request.password, user.password_hash):
+            raise HTTPException(401, "Invalid email or password")
         return await create_session(user)
 
 
@@ -138,7 +255,11 @@ def get_user_id_from_token(token: str) -> int | None:
 @app.get("/api/me")
 async def current_user(authorization: str | None = Header(default=None)):
     user = await authenticated_user(authorization)
-    return {"id": user.id, "username": user.username}
+    return {
+        "id": user.id,
+        "username": format_username(user.username),
+        "email": user.email,
+    }
 
 
 @app.get("/api/users")
@@ -149,11 +270,39 @@ async def users(
     user = await authenticated_user(authorization)
     normalized_search = search.strip().lower()
     async with SessionLocal() as session:
-        query = select(User).where(User.id != user.id).order_by(User.username).limit(50)
         if normalized_search:
-            query = query.where(User.username.contains(normalized_search))
+            # When user searches by name, search across all registered users to start a new conversation
+            query = (
+                select(User)
+                .where(User.id != user.id)
+                .where(func.lower(User.username).contains(normalized_search))
+                .order_by(User.username)
+                .limit(50)
+            )
+        else:
+            # Default view: show only users with whom the authenticated user has exchanged messages
+            interacted_user_ids = (
+                select(
+                    case(
+                        (Message.sender_id == user.id, Message.receiver_id),
+                        else_=Message.sender_id,
+                    ).label("other_user_id"),
+                    func.max(Message.created_at).label("last_message_at"),
+                )
+                .where((Message.sender_id == user.id) | (Message.receiver_id == user.id))
+                .group_by("other_user_id")
+                .subquery()
+            )
+
+            query = (
+                select(User)
+                .join(interacted_user_ids, User.id == interacted_user_ids.c.other_user_id)
+                .order_by(interacted_user_ids.c.last_message_at.desc())
+                .limit(50)
+            )
         result = await session.execute(query)
-        return [{"id": item.id, "username": item.username} for item in result.scalars()]
+        user_list = result.scalars().all()
+        return [{"id": item.id, "username": item.username, "email": item.email} for item in user_list]
 
 
 @app.get("/api/messages/{other_user_id}")
@@ -212,6 +361,7 @@ async def relay_call_signal(payload: dict, sender_id: int, default_target_id: in
     event = {
         "type": signal_type,
         "sender_id": sender_id,
+        "sender_username": payload.get("sender_username"),
         "receiver_id": target_id,
         "sdp": payload.get("sdp"),
         "candidate": payload.get("candidate"),
@@ -370,17 +520,14 @@ async def voice_search(
                 "tts_audio": await generate_tts(tts_text),
             }
 
-        # ---------------------------------------------------------
-        # 2. LLM -> extract receiver + message
-        # ---------------------------------------------------------
+
         command = await parse_command(text)
 
-        receiver_name = command.receiver.strip()
-        message = command.message.strip()
+        action = command.action or "send_message"
+        receiver_name = (command.receiver or "").strip()
+        message = (command.message or "").strip()
+        call_type = command.call_type or "unspecified"
 
-        # ---------------------------------------------------------
-        # 3. Search users
-        # ---------------------------------------------------------
         matches = await search_users_by_name(
             receiver_name,
             exclude_id=sender.id,
@@ -390,13 +537,11 @@ async def voice_search(
             {
                 "id": user.id,
                 "username": user.username,
+                "email": user.email or "",
             }
             for user in matches
         ]
 
-        # ---------------------------------------------------------
-        # 4. No users
-        # ---------------------------------------------------------
         if not users:
             tts_text = (
                 f"I could not find a user named {receiver_name}. "
@@ -406,6 +551,8 @@ async def voice_search(
             return {
                 "success": False,
                 "stage": "user_not_found",
+                "action": action,
+                "call_type": call_type,
                 "transcribed_text": text,
                 "receiver": receiver_name,
                 "message": message,
@@ -413,11 +560,23 @@ async def voice_search(
                 "tts_audio": await generate_tts(tts_text),
             }
 
-        # ---------------------------------------------------------
-        # 5. One user -> go directly to confirmation
-        # ---------------------------------------------------------
         if len(users) == 1:
             selected_user = users[0]
+
+            if action == "call_user":
+                tts_text = f"I found {selected_user['username']}. Would you like an audio call or a video call?"
+                return {
+                    "success": True,
+                    "stage": "call_options",
+                    "action": action,
+                    "call_type": call_type,
+                    "transcribed_text": text,
+                    "receiver": receiver_name,
+                    "message": message,
+                    "users": users,
+                    "selected_user": selected_user,
+                    "tts_audio": await generate_tts(tts_text),
+                }
 
             tts_text = (
                 f"I found {selected_user['username']}. "
@@ -429,6 +588,8 @@ async def voice_search(
             return {
                 "success": True,
                 "stage": "confirmation",
+                "action": action,
+                "call_type": call_type,
                 "transcribed_text": text,
                 "receiver": receiver_name,
                 "message": message,
@@ -437,9 +598,6 @@ async def voice_search(
                 "tts_audio": await generate_tts(tts_text),
             }
 
-        # ---------------------------------------------------------
-        # 6. Multiple users -> ask for option
-        # ---------------------------------------------------------
         lines = [
             f"Option {index + 1}. {user['username']}"
             for index, user in enumerate(users)
@@ -456,6 +614,8 @@ async def voice_search(
         return {
             "success": True,
             "stage": "user_selection",
+            "action": action,
+            "call_type": call_type,
             "transcribed_text": text,
             "receiver": receiver_name,
             "message": message,
@@ -699,7 +859,10 @@ async def call_summary(
     my_name: str = "",
     call_start: str = "",
     call_end: str = "",
-    call_events: str = "",   # optional JSON array of browser-side events
+    call_events: str = "",
+    target_email: str = "",
+    caller_email: str = "",
+    receiver_email: str = "",
 ):
     """
     Receives local + remote audio blobs from the browser after a video call ends.
@@ -716,6 +879,11 @@ async def call_summary(
 
     my_display = my_name or user.username
     peer_display = peer_name or "Peer"
+    my_mail = caller_email or user.email or ""
+    rec_mail = receiver_email or ""
+    email_destination = target_email or rec_mail or my_mail
+
+    print(f"[call-summary] Caller: {my_display} ({my_mail}) -> Receiver: {peer_display} ({rec_mail}) | Sending summary to: {email_destination}")
 
     # Build readable interleaved transcript
     transcript_lines = []
@@ -747,11 +915,10 @@ async def call_summary(
 
     # Participants list
     participants = [
-        {"name": my_display,   "role": "caller"},
-        {"name": peer_display, "role": "receiver"},
+        {"name": my_display,   "email": my_mail,  "role": "caller"},
+        {"name": peer_display, "email": rec_mail, "role": "receiver"},
     ]
 
-    # Important events — from browser-sent JSON array or sensible defaults
     important_events = []
     try:
         if call_events:
@@ -776,7 +943,11 @@ async def call_summary(
         # ── Identity & timing ──────────────────────────────────────────
         "call_id":         call_id,
         "caller":          my_display,
+        "caller_email":    my_mail,
         "receiver":        peer_display,
+        "receiver_email":  rec_mail,
+        "email":           email_destination,
+        "to_email":        email_destination,
         "participants":    participants,
         "call_start":      call_start or "Not available",
         "call_end":        call_end   or "Not available",
@@ -845,98 +1016,4 @@ async def list_stored_reports():
     return {
         "stored_count": len(call_reports),
         "call_ids": list(call_reports.keys()),
-    }
-
-
-DUMMY_CONVERSATION = """Rahul: Hi Priya, thanks for joining. I wanted to discuss the current status of the website and what we need to finish before the launch.
-Priya: Sure. The frontend is mostly complete. The login page, dashboard, and user profile are finished. I'm currently working on the notification feature.
-Rahul: How much work is left on the notification feature?
-Priya: The UI is almost finished, but I still need the notification API from the backend.
-Rahul: I spoke with Amit earlier. He said the API should be ready by Thursday.
-Priya: Okay. Once I get the API, I should need about two days to integrate it and test the feature.
-Rahul: So integration testing should be finished by Friday?
-Priya: Yes, assuming the API is delivered on Thursday.
-Rahul: Good. What about the database migration?
-Priya: I don't have any issues on the frontend side. Is the migration already tested?
-Rahul: Not completely. The migration scripts are ready, but they still need to be tested on the staging database.
-Priya: That should be done before we start the final testing.
-Rahul: Agreed. There's also an issue with the SMTP configuration in staging. Emails aren't being delivered correctly.
-Priya: Is that blocking the notification development?
-Rahul: No, development can continue, but we need to fix it before production deployment.
-Priya: Okay. When are we planning to launch?
-Rahul: The current target is Monday, September 28.
-Priya: That's quite soon. Are we deploying to AWS?
-Rahul: Yes. Production will be hosted on AWS. We're keeping the current server for staging.
-Priya: Do we have the production domain ready?
-Rahul: Not yet. The client still needs to confirm the final branding and domain name.
-Priya: Understood. I'll continue with the frontend work while we wait for the API.
-Rahul: I'll follow up with the infrastructure team today about the SMTP issue and make sure the database migration testing is completed.
-Priya: I'll finish the notification UI today and start integration as soon as the API is available.
-Rahul: Perfect. Let's target Friday for the complete integration test.
-Priya: Sounds good. If we find any major issues during testing, we'll discuss them before the launch.
-Rahul: Exactly. I'll schedule a short review meeting for Friday afternoon.
-Priya: Great. Thanks, Rahul.
-Rahul: Thanks, Priya. Talk to you Friday."""
-
-
-@app.post("/api/calls/test-dummy")
-async def trigger_dummy_call_summary():
-    """
-    Simulates a completed call with dummy transcript between Rahul and Priya,
-    stores report in memory for n8n retrieval, and forwards payload to n8n webhook.
-    """
-    call_id = str(uuid.uuid4())
-    rahul_lines = "\n".join(
-        [line.split("Rahul: ", 1)[1] for line in DUMMY_CONVERSATION.splitlines() if line.startswith("Rahul: ")]
-    )
-    priya_lines = "\n".join(
-        [line.split("Priya: ", 1)[1] for line in DUMMY_CONVERSATION.splitlines() if line.startswith("Priya: ")]
-    )
-
-    payload = {
-        "call_id": call_id,
-        "caller": "Rahul",
-        "receiver": "Priya",
-        "participants": [
-            {"name": "Rahul", "role": "caller"},
-            {"name": "Priya", "role": "receiver"},
-        ],
-        "call_start": "2026-09-22T10:00:00.000Z",
-        "call_end": "2026-09-22T10:08:45.000Z",
-        "call_duration": "8m 45s",
-        "local_transcript": rahul_lines,
-        "remote_transcript": priya_lines,
-        "full_transcript": DUMMY_CONVERSATION,
-        "important_events": [
-            {"time": "2026-09-22T10:00:00.000Z", "event": "Call started", "participant": "Rahul"},
-            {"time": "2026-09-22T10:00:05.000Z", "event": "Participant joined", "participant": "Priya"},
-            {"time": "2026-09-22T10:08:45.000Z", "event": "Call ended", "participant": "Rahul"},
-        ],
-        "decisions": [],
-        "action_items": [],
-        "technical_issues": [],
-    }
-
-    if len(call_reports) >= MAX_CALL_REPORTS:
-        oldest_key = next(iter(call_reports))
-        del call_reports[oldest_key]
-    call_reports[call_id] = payload
-
-    n8n_status = None
-    n8n_body = ""
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            n8n_resp = await client.post(N8N_WEBHOOK_URL, json=payload)
-        n8n_status = n8n_resp.status_code
-        n8n_body = n8n_resp.text
-    except Exception as e:
-        n8n_body = str(e)
-
-    return {
-        "ok": True,
-        "call_id": call_id,
-        "n8n_status": n8n_status,
-        "n8n_response": n8n_body,
-        "report_data_url": f"/api/calls/{call_id}/report-data",
-        "summary_webhook_url": N8N_WEBHOOK_URL,
     }

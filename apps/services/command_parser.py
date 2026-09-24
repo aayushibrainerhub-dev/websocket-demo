@@ -27,10 +27,6 @@ _SPOKEN_REPLACEMENTS = {
 
 
 def normalize_transcript(text: str) -> str:
-    """Normalize spoken artifacts from Whisper output before LLM parsing.
-    Converts spoken email/username patterns like 'alice at gmail dot com'
-    into their symbolic form 'alice@gmail.com'.
-    """
     lowered = text.lower().strip()
     for spoken, symbol in _SPOKEN_REPLACEMENTS.items():
         lowered = lowered.replace(spoken, symbol)
@@ -39,25 +35,40 @@ def normalize_transcript(text: str) -> str:
     return lowered
 
 
-SYSTEM_PROMPT = """You are a voice command parser for a chat application.
+SYSTEM_PROMPT = """You are a voice command parser for a chat and calling application.
 Always respond with valid JSON only — no markdown, no explanation.
 
-Supported action: send_message
+Supported actions:
+1. "send_message" — when user wants to send/say/tell a chat message.
+2. "call_user" — when user wants to call, video call, voice call, or audio call someone.
 
-Extract:
-- action: always "send_message"
-- receiver: the name of the recipient exactly as spoken (e.g. "rishi", "rishi pandey", "aayushi shah")
-- message: exact message to send
+Fields to extract:
+- action: "send_message" or "call_user"
+- receiver: the name or username of the recipient exactly as spoken (e.g. "rishi", "rishi pandey", "aayushi", "aayushi shah")
+- message: exact message to send (only for send_message)
+- call_type: "video" (for video calls), "audio" (for audio / voice calls), or "unspecified" (if user simply says "call someone")
 
 Examples:
 Input: "message rishi saying hey how are you"
-Output: {"action": "send_message", "receiver": "rishi", "message": "hey how are you"}
+Output: {"action": "send_message", "receiver": "rishi", "message": "hey how are you", "call_type": null}
 
 Input: "send a message to rishi pandey saying I will come tomorrow"
-Output: {"action": "send_message", "receiver": "rishi pandey", "message": "I will come tomorrow"}
+Output: {"action": "send_message", "receiver": "rishi pandey", "message": "I will come tomorrow", "call_type": null}
 
-Input: "tell aayushi shah that the meeting is at 5"
-Output: {"action": "send_message", "receiver": "aayushi shah", "message": "the meeting is at 5"}
+Input: "call aayushi"
+Output: {"action": "call_user", "receiver": "aayushi", "message": null, "call_type": "unspecified"}
+
+Input: "make a video call to aayushi shah"
+Output: {"action": "call_user", "receiver": "aayushi shah", "message": null, "call_type": "video"}
+
+Input: "start an audio call with alex"
+Output: {"action": "call_user", "receiver": "alex", "message": null, "call_type": "audio"}
+
+Input: "video call rishi"
+Output: {"action": "call_user", "receiver": "rishi", "message": null, "call_type": "video"}
+
+Input: "voice call priya"
+Output: {"action": "call_user", "receiver": "priya", "message": null, "call_type": "audio"}
 
 Rules:
 - Never invent names or message content.

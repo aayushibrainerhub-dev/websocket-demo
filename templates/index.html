@@ -5,52 +5,136 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Relay | Private conversations</title>
-    <link rel="stylesheet" href="/static/css/app.css">
+    <link rel="stylesheet" href="/static/css/app.css?v=2026092314">
 </head>
 
 <body>
     <main class="shell">
 
         <section id="authView" class="auth-layout">
+            <div class="auth-ambient-orb-1"></div>
+            <div class="auth-ambient-orb-2"></div>
+
             <div class="brand-panel">
-                <span class="eyebrow">RELAY / PRIVATE MESSAGING</span>
+                <div class="brand-badge-pill">
+                    <span class="badge-dot"></span>
+                    <span>RELAY • PRIVATE MESSAGING</span>
+                </div>
                 <h1>Conversations that stay close.</h1>
                 <p>
                     Find your people, pick a thread, and talk in real
-                    time with a quiet, focused workspace.
+                    time with a quiet, focused, and secure workspace.
                 </p>
-                <div class="signal">
+                <div class="brand-feature-card">
+                    <div class="bfc-header">
+                        <div class="bfc-user">
+                            <!-- <span class="bfc-avatar">✦</span> -->
+                            <div>
+                                <strong>Live Encrypted Session</strong>
+                                <small>WebSocket direct stream</small>
+                            </div>
+                        </div>
+                        <span class="bfc-tag">SECURE</span>
+                    </div>
+                    <div class="bfc-preview-msg">
+                        "Your messages, voice notes, and video calls stay private, crisp, and responsive."
+                    </div>
+                    <div class="bfc-stats">
+                        <span>⚡ Instant sync</span>
+                        <span>🔒 Private channel</span>
+                        <span>📹 HD WebRTC</span>
+                    </div>
+                </div>
+                <!-- <div class="signal">
                     <span></span>
                     End-to-end ready architecture
-                </div>
+                </div> -->
             </div>
 
-            <form id="authForm" class="auth-card">
-                <div class="card-kicker">WELCOME IN</div>
-                <h2>Start a conversation</h2>
-                <p class="muted">Create an account or sign back into Relay.</p>
+            <!-- Sign Up Card (Shown by Default) -->
+            <form id="signupCard" class="auth-card">
+                <div class="card-kicker">NEW ACCOUNT</div>
+                <h2>Create your account</h2>
+                <p class="muted">Sign up with your email to start conversations on Relay.</p>
 
-                <label>
-                    Username
-                    <input id="username" required minlength="2" maxlength="50" autocomplete="username">
-                </label>
+                <div class="form-group">
+                    <label for="signupUsername" class="form-label">
+                        <span>Display Username</span>
+                        <span class="label-hint">(e.g. alex, aayushi)</span>
+                    </label>
+                    <input id="signupUsername" class="form-input" required minlength="2" maxlength="50"
+                        autocomplete="off" placeholder="Choose a display username">
+                </div>
 
-                <label>
-                    Password
-                    <input id="password" required minlength="6" type="password" autocomplete="current-password">
-                </label>
+                <div class="form-group">
+                    <label for="signupEmail" class="form-label">Gmail / Email Address</label>
+                    <div class="input-with-action">
+                        <input id="signupEmail" class="form-input" type="email" required autocomplete="email"
+                            placeholder="name@gmail.com">
+                        <button type="button" id="sendOtpBtn" class="button button-action">Send OTP</button>
+                    </div>
+                </div>
+
+                <div id="otpStatus" class="status-msg hidden"></div>
+
+                <div class="form-group">
+                    <label for="signupOtp" class="form-label">Verification OTP</label>
+                    <input id="signupOtp" class="form-input" required maxlength="6" pattern="[0-9]{6}"
+                        autocomplete="one-time-code" placeholder="Enter 6-digit code from email">
+                </div>
+
+                <div class="form-group">
+                    <label for="signupPassword" class="form-label">Password</label>
+                    <input id="signupPassword" class="form-input" required minlength="6" type="password"
+                        autocomplete="new-password" placeholder="At least 6 characters">
+                </div>
 
                 <div class="auth-actions">
-                    <button type="button" class="button button-quiet" id="registerButton">
+                    <button type="submit" class="button button-primary" id="signupSubmitBtn">
                         Create account
+                        <span>→</span>
                     </button>
-                    <button class="button button-primary">
+                </div>
+
+                <p id="signupError" class="error" role="alert"></p>
+
+                <div class="auth-switch">
+                    <span>Already have an account?</span>
+                    <button type="button" id="switchToLoginBtn" class="link-button">Sign in</button>
+                </div>
+            </form>
+
+            <!-- Login Card (Shown when toggled to Login) -->
+            <form id="loginCard" class="auth-card hidden">
+                <div class="card-kicker">WELCOME BACK</div>
+                <h2>Sign in to Relay</h2>
+                <p class="muted">Enter your email and password to access your messages.</p>
+
+                <div class="form-group">
+                    <label for="loginEmail" class="form-label">Gmail / Email Address</label>
+                    <input id="loginEmail" class="form-input" type="email" required autocomplete="email"
+                        placeholder="name@gmail.com">
+                </div>
+
+                <div class="form-group">
+                    <label for="loginPassword" class="form-label">Password</label>
+                    <input id="loginPassword" class="form-input" required minlength="6" type="password"
+                        autocomplete="current-password" placeholder="Your password">
+                </div>
+
+                <div class="auth-actions">
+                    <button type="submit" class="button button-primary" id="loginSubmitBtn">
                         Sign in
                         <span>→</span>
                     </button>
                 </div>
 
-                <p id="authError" class="error" role="alert"></p>
+                <p id="loginError" class="error" role="alert"></p>
+
+                <div class="auth-switch">
+                    <span>Don't have an account?</span>
+                    <button type="button" id="switchToSignupBtn" class="link-button">Sign up</button>
+                </div>
             </form>
         </section>
 
@@ -77,13 +161,23 @@
                 </header>
 
                 <div class="sidebar-heading">
-                    <span class="eyebrow">SCENARIOS</span>
-                    <span class="online-dot" title="Online"></span>
+                    <span class="eyebrow">CONVERSATIONS</span>
+                    <button id="newChatBtn" class="icon-button mini-action-btn" title="Start new conversation" type="button" style="width: 26px; height: 26px; font-size: 14px; border-radius: 8px;">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14">
+                            <path d="M12 5v14M5 12h14"/>
+                        </svg>
+                    </button>
                 </div>
 
-                <label class="search">
-                    <span>⌕</span>
-                    <input id="userSearch" placeholder="Find a person" autocomplete="off">
+                <label class="search" for="userSearch">
+                    <span class="search-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" stroke-linejoin="round" width="15" height="15">
+                            <circle cx="11" cy="11" r="8"></circle>
+                            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                        </svg>
+                    </span>
+                    <input id="userSearch" placeholder="Find people or messages..." autocomplete="off">
                 </label>
 
                 <div id="userList" class="user-list">
@@ -92,81 +186,156 @@
 
                 <article class="tutor-card">
                     <div class="tutor-card-top">
-                        <span class="eyebrow">YOU</span>
-                        <span class="tutor-menu">☰</span>
+                        <span class="eyebrow">YOUR PROFILE</span>
+                        <span class="online-chip"><span class="online-dot"></span> Active</span>
                     </div>
-                    <div class="tutor-avatar" aria-hidden="true">
-                        <svg viewBox="0 0 160 160" width="120" height="120">
-                            <circle cx="80" cy="80" r="72" fill="#f3d98a" />
-                            <circle cx="80" cy="92" r="46" fill="#f0c27a" />
-                            <ellipse cx="80" cy="58" rx="42" ry="28" fill="#3d4a5c" />
-                            <ellipse cx="80" cy="48" rx="38" ry="18" fill="#2c3644" />
-                            <circle cx="64" cy="88" r="7" fill="#2a2a2a" />
-                            <circle cx="96" cy="88" r="7" fill="#2a2a2a" />
-                            <path d="M70 108c6 6 14 6 20 0" fill="none" stroke="#2a2a2a" stroke-width="3"
-                                stroke-linecap="round" />
-                            <rect x="48" y="92" width="22" height="6" rx="3" fill="#c9d7e8" opacity="0.9" />
-                            <rect x="90" y="92" width="22" height="6" rx="3" fill="#c9d7e8" opacity="0.9" />
-                        </svg>
+                    <div class="tutor-body">
+                        <div class="tutor-avatar-badge" id="profileBadge">
+                            <span id="profileInitial"></span>
+                        </div>
+                        <div class="tutor-details">
+                            <span class="tutor-label">USERNAME</span>
+                            <h2 id="profileName" class="tutor-name"></h2>
+                            <p id="profileEmail" class="tutor-email"></p>
+                        </div>
                     </div>
-                    <p class="tutor-hello">Hey! My name is</p>
-                    <h2 id="profileName" class="tutor-name"></h2>
-                    <p class="tutor-bio">
-                        Your private messaging space. Search a person, open a thread, and talk live.
-                    </p>
+                    <div class="tutor-card-footer">
+                        <span class="badge-status">🔒 Private &amp; encrypted</span>
+                    </div>
                 </article>
             </aside>
 
             <section class="conversation">
                 <div id="emptyConversation" class="conversation-empty">
-                    <div class="empty-mark">✦</div>
-                    <h2>Your space for good conversations.</h2>
-                    <p>Select a person from the left to open a direct message.</p>
+                    <div class="empty-ambient-glow"></div>
+                    <div class="empty-card">
+                        <div class="empty-hero-orb">
+                            <div class="orb-icon">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                                    stroke-linecap="round" stroke-linejoin="round" width="34" height="34">
+                                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                                </svg>
+                            </div>
+                            <span class="orb-sparkle">✦</span>
+                        </div>
+                        <div class="empty-badge">⚡ REALTIME &amp; ENCRYPTED</div>
+                        <h2>Your space for good conversations.</h2>
+                        <p>Select a person from the left to start chatting in real time with private messages, voice
+                            notes, and high-definition video calls.</p>
+                        <div class="empty-features-grid">
+                            <div class="empty-feature-item" data-action="talk">
+                                <div class="empty-feature-top">
+                                    <span class="feat-icon">🎙️</span>
+                                    <strong>Talk</strong>
+                                </div>
+                                <div class="empty-feature-bottom">
+                                    <span>Speak &amp; Call</span>
+                                    <span class="feat-arrow">↗</span>
+                                </div>
+                            </div>
+                            <div class="empty-feature-item" data-action="write">
+                                <div class="empty-feature-top">
+                                    <span class="feat-icon">✍️</span>
+                                    <strong>Write</strong>
+                                </div>
+                                <div class="empty-feature-bottom">
+                                    <span>Realtime Chat</span>
+                                    <span class="feat-arrow">↗</span>
+                                </div>
+                            </div>
+                            <div class="empty-feature-item" data-action="video">
+                                <div class="empty-feature-top">
+                                    <span class="feat-icon">📹</span>
+                                    <strong>Video</strong>
+                                </div>
+                                <div class="empty-feature-bottom">
+                                    <span>HD WebRTC</span>
+                                    <span class="feat-arrow">↗</span>
+                                </div>
+                            </div>
+                            <div class="empty-feature-item" data-action="media">
+                                <div class="empty-feature-top">
+                                    <span class="feat-icon">🖼️</span>
+                                    <strong>Media</strong>
+                                </div>
+                                <div class="empty-feature-bottom">
+                                    <span>Voice &amp; Media</span>
+                                    <span class="feat-arrow">↗</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="empty-hint-pill">
+                            <span>💡 Select any contact on the left to begin</span>
+                        </div>
+                    </div>
                 </div>
 
                 <div id="activeConversation" class="hidden full-height">
 
                     <header class="conversation-header">
-                        <div class="person-avatar" id="conversationAvatar"></div>
-                        <div class="conversation-meta">
-                            <h2 id="conversationName"></h2>
-                            <p id="connectionStatus">Connecting...</p>
+                        <div class="conversation-person-info">
+                            <div class="person-avatar-wrap">
+                                <div class="person-avatar" id="conversationAvatar"></div>
+                                <span class="status-pulse-dot" title="Online"></span>
+                            </div>
+                            <div class="conversation-meta">
+                                <h2 id="conversationName"></h2>
+                                <div class="connection-status-row">
+                                    <span class="live-dot" id="connectionDot"></span>
+                                    <p id="connectionStatus">Connecting...</p>
+                                </div>
+                            </div>
                         </div>
-                        <button type="button" class="call-btn" data-video-call title="Start video call">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                                stroke-linecap="round" stroke-linejoin="round" width="16" height="16">
-                                <polygon points="23 7 16 12 23 17 23 7" />
-                                <rect x="1" y="5" width="15" height="14" rx="2" />
-                            </svg>
-                            Video call
-                        </button>
+                        <div class="conversation-actions">
+                            <button type="button" class="call-btn audio-call-btn" data-voice-call title="Start voice call">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                    stroke-linecap="round" stroke-linejoin="round" width="15" height="15">
+                                    <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />
+                                </svg>
+                                <span>Voice</span>
+                            </button>
+                            <button type="button" class="call-btn video-call-btn" data-video-call title="Start video call">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                    stroke-linecap="round" stroke-linejoin="round" width="15" height="15">
+                                    <polygon points="23 7 16 12 23 17 23 7" />
+                                    <rect x="1" y="5" width="15" height="14" rx="2" />
+                                </svg>
+                                <span>Video</span>
+                            </button>
+                        </div>
                     </header>
 
                     <div id="messages" class="messages">
 
                     </div>
 
-
                     <form id="messageForm" class="composer">
-                        <button type="button" id="chatVoiceBtn" class="chat-voice-btn" title="Voice message">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                                stroke-linecap="round" stroke-linejoin="round" width="16" height="16">
-                                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
-                                <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-                                <line x1="12" y1="19" x2="12" y2="23" />
-                                <line x1="8" y1="23" x2="16" y2="23" />
-                            </svg>
-                        </button>
-                        <button type="button" class="chat-call-btn" data-video-call title="Start video call">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                                stroke-linecap="round" stroke-linejoin="round" width="16" height="16">
-                                <polygon points="23 7 16 12 23 17 23 7" />
-                                <rect x="1" y="5" width="15" height="14" rx="2" />
-                            </svg>
-                            Call
-                        </button>
-                        <input id="messageInput" placeholder="Type anything here..." maxlength="2000"
-                            autocomplete="off">
+                        <div class="composer-actions-left">
+                            <button type="button" id="chatVoiceBtn" class="chat-voice-btn"
+                                title="Voice message">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                    stroke-linecap="round" stroke-linejoin="round" width="16" height="16">
+                                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                                    <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                                    <line x1="12" y1="19" x2="12" y2="23" />
+                                    <line x1="8" y1="23" x2="16" y2="23" />
+                                </svg>
+                            </button>
+                            <button type="button" class="chat-call-btn audio-chat-btn" data-voice-call title="Voice call">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                    stroke-linecap="round" stroke-linejoin="round" width="15" height="15">
+                                    <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" />
+                                </svg>
+                            </button>
+                            <button type="button" class="chat-call-btn video-chat-btn" data-video-call title="Video call">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                    stroke-linecap="round" stroke-linejoin="round" width="15" height="15">
+                                    <polygon points="23 7 16 12 23 17 23 7" />
+                                    <rect x="1" y="5" width="15" height="14" rx="2" />
+                                </svg>
+                            </button>
+                        </div>
+                        <input id="messageInput" placeholder="Write a message..." maxlength="2000" autocomplete="off">
                         <button class="send-button" title="Send message" type="submit">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
                                 stroke-linecap="round" stroke-linejoin="round" width="15" height="15">
@@ -271,6 +440,28 @@
                 </div>
             </div>
 
+            <div id="vStepCallOptions" class="vstep hidden">
+                <p class="vstep-title">Start a Call</p>
+                <p class="vstep-hint">Calling <strong id="vCallTargetUser"></strong></p>
+                
+                <div class="vmodal-call-choices" style="display: flex; gap: 14px; margin: 20px 0 16px;">
+                    <button type="button" id="vStartAudioCallBtn" class="summary-option-item" style="flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 20px 14px; text-align: center; gap: 8px;">
+                        <span style="font-size: 26px;">🎙️</span>
+                        <strong style="font-size: 15px; color: #0f172a;">Voice Call</strong>
+                        <small style="color: #64748b;">Audio stream</small>
+                    </button>
+                    
+                    <button type="button" id="vStartVideoCallBtn" class="summary-option-item" style="flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 20px 14px; text-align: center; gap: 8px;">
+                        <span style="font-size: 26px;">📹</span>
+                        <strong style="font-size: 15px; color: #0f172a;">Video Call</strong>
+                        <small style="color: #64748b;">HD video + audio</small>
+                    </button>
+                </div>
+
+                <p id="vCallStatus" class="vstep-status">🎤 Say "audio" or "video" or click above.</p>
+                <button class="vback-btn" id="vCallBackBtn" type="button">← Try again</button>
+            </div>
+
             <button id="vCloseBtn" class="vmodal-close" title="Close voice assistant" type="button">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
                     stroke-linejoin="round" width="18" height="18">
@@ -334,7 +525,47 @@
         </div>
     </div>
 
-    <script src="/static/js/app.js"></script>
+    <!-- Summary Email Recipient Selection Modal -->
+    <div id="summaryEmailModal" class="vmodal hidden">
+        <div class="vmodal-box summary-email-card">
+            <div class="card-kicker">CALL COMPLETED</div>
+            <h2>Send Call Summary Report</h2>
+            <p class="muted">Where would you like n8n to send the AI meeting summary?</p>
+            
+            <div class="summary-options-list">
+                <label class="summary-option-item" id="optReceiverLabel">
+                    <input type="radio" name="summaryRecipient" value="receiver" id="optReceiverRadio" checked>
+                    <div class="opt-content">
+                        <strong id="optReceiverName">Receiver</strong>
+                        <small id="optReceiverEmail">receiver@example.com</small>
+                    </div>
+                </label>
+                
+                <label class="summary-option-item" id="optSenderLabel">
+                    <input type="radio" name="summaryRecipient" value="sender" id="optSenderRadio">
+                    <div class="opt-content">
+                        <strong id="optSenderName">Me (Sender)</strong>
+                        <small id="optSenderEmail">sender@example.com</small>
+                    </div>
+                </label>
+                
+                <label class="summary-option-item" id="optCustomLabel">
+                    <input type="radio" name="summaryRecipient" value="custom" id="optCustomRadio">
+                    <div class="opt-content">
+                        <strong>Custom Email</strong>
+                        <input type="email" id="optCustomEmailInput" class="form-input custom-email-field" placeholder="Enter email address" style="margin-top: 6px; padding: 8px 12px; font-size: 13px;">
+                    </div>
+                </label>
+            </div>
+
+            <div class="vmodal-actions" style="margin-top: 22px;">
+                <button type="button" id="summaryCancelBtn" class="vbtn-retry">Skip</button>
+                <button type="button" id="summarySendBtn" class="vbtn-confirm">Send Report →</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js?v=voice-call-1"></script>
 </body>
 
 </html>
