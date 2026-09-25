@@ -1,4 +1,5 @@
 from requests import session
+from livekit import api as livekit_api
 import hashlib
 import hmac
 import json
@@ -22,10 +23,11 @@ from apps.models.schemas import (
     SendOtpRequest,
     RegisterRequest,
     LoginRequest,
+    CreateGroupRequest,
 )
 import logging
 from apps.models.database import SessionLocal, lifespan
-from apps.models.model import Message, User
+from apps.models.model import Message, User, Group, GroupMember, GroupMessage
 from apps.ws_service import ConnectionManager
 
 import asyncio
@@ -41,14 +43,15 @@ from apps.services.email_service import send_otp_email
 
 
 logger = logging.getLogger(__name__)
+from apps.services.email_service import send_otp_email
+
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(lifespan=lifespan)
 N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL", "")
 manager = ConnectionManager()
 voice_sessions = {}
-# In-memory store for call report data keyed by call_id.
-# n8n's HTTP Request node fetches from GET /api/calls/{call_id}/report-data.
-# Capped at 200 entries; oldest entry evicted when full.
 call_reports: dict = {}
 MAX_CALL_REPORTS = 200
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -59,14 +62,21 @@ JWT_EXPIRE_MINUTES = 60
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
 
-# WEBRTC signals needed for the video calls which is provided in built in websockets
-# TODO: implement webrtc signaling 
+# LiveKit SFU configuration
+LIVEKIT_URL = os.getenv("LIVEKIT_URL", "")
+LIVEKIT_API_KEY = os.getenv("LIVEKIT_API_KEY", "")
+LIVEKIT_API_SECRET = os.getenv("LIVEKIT_API_SECRET", "")
+
+# Signaling types – legacy P2P kept for backwards compat + new LiveKit group call signals
 CALL_SIGNAL_TYPES = {
     "call_offer",
     "call_answer",
     "call_ice",
     "call_reject",
     "call_end",
+    # LiveKit group call signals
+    "call_invite",
+    "call_leave",
 }
 
 
@@ -271,7 +281,6 @@ async def users(
     normalized_search = search.strip().lower()
     async with SessionLocal() as session:
         if normalized_search:
-            # When user searches by name, search across all registered users to start a new conversation
             query = (
                 select(User)
                 .where(User.id != user.id)
@@ -280,7 +289,6 @@ async def users(
                 .limit(50)
             )
         else:
-            # Default view: show only users with whom the authenticated user has exchanged messages
             interacted_user_ids = (
                 select(
                     case(
@@ -338,6 +346,174 @@ async def message_history(
         ]
 
 
+@app.post("/api/groups")
+async def create_group(
+    body: CreateGroupRequest,
+    authorization: str | None = Header(default=None),
+):
+    user = await authenticated_user(authorization)
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(400, "Group name is required")
+
+    member_ids = set(body.member_ids)
+    member_ids.add(user.id)
+
+    async with SessionLocal() as session:
+        r = await session.execute(select(User).where(User.id.in_(member_ids)))
+        valid_users = r.scalars().all()
+        if len(valid_users) < 2:
+            raise HTTPException(400, "A group must have at least 2 members")
+
+        new_group = Group(name=name, created_by=user.id)
+        session.add(new_group)
+        await session.commit()
+        await session.refresh(new_group)
+
+        for u in valid_users:
+            gm = GroupMember(group_id=new_group.id, user_id=u.id)
+            session.add(gm)
+        await session.commit()
+
+        members_data = [{"id": u.id, "username": u.username, "email": u.email} for u in valid_users]
+        return {
+            "id": new_group.id,
+            "name": new_group.name,
+            "created_by": new_group.created_by,
+            "created_at": new_group.created_at.isoformat(),
+            "members": members_data,
+        }
+
+
+@app.get("/api/groups")
+async def get_user_groups(
+    authorization: str | None = Header(default=None),
+):
+    user = await authenticated_user(authorization)
+    async with SessionLocal() as session:
+        q = (
+            select(Group)
+            .join(GroupMember, Group.id == GroupMember.group_id)
+            .where(GroupMember.user_id == user.id)
+            .order_by(Group.created_at.desc())
+        )
+        groups_res = (await session.execute(q)).scalars().all()
+
+        results = []
+        for g in groups_res:
+            mq = (
+                select(User)
+                .join(GroupMember, User.id == GroupMember.user_id)
+                .where(GroupMember.group_id == g.id)
+            )
+            members = (await session.execute(mq)).scalars().all()
+            results.append({
+                "id": g.id,
+                "name": g.name,
+                "created_by": g.created_by,
+                "created_at": g.created_at.isoformat(),
+                "members": [{"id": u.id, "username": u.username, "email": u.email} for u in members],
+            })
+        return results
+
+
+@app.get("/api/groups/{group_id}/messages")
+async def get_group_messages(
+    group_id: int,
+    authorization: str | None = Header(default=None),
+):
+    user = await authenticated_user(authorization)
+    async with SessionLocal() as session:
+        chk = await session.execute(
+            select(GroupMember).where(GroupMember.group_id == group_id, GroupMember.user_id == user.id)
+        )
+        if chk.scalar_one_or_none() is None:
+            raise HTTPException(403, "Not a member of this group")
+
+        q = (
+            select(GroupMessage, User.username)
+            .join(User, User.id == GroupMessage.sender_id)
+            .where(GroupMessage.group_id == group_id)
+            .order_by(GroupMessage.created_at.asc(), GroupMessage.id.asc())
+            .limit(200)
+        )
+        res = (await session.execute(q)).all()
+        return [
+            {
+                "id": msg.id,
+                "group_id": group_id,
+                "sender_id": msg.sender_id,
+                "sender_username": username,
+                "content": msg.content,
+                "created_at": msg.created_at.isoformat(),
+            }
+            for msg, username in res
+        ]
+
+
+@app.websocket("/ws/group/{group_id}")
+async def group_websocket_endpoint(
+    websocket: WebSocket,
+    group_id: int,
+    token: str = Query(...),
+):
+    sender_id = get_user_id_from_token(token)
+    async with SessionLocal() as session:
+        sender = await session.get(User, sender_id) if sender_id is not None else None
+        if sender is None:
+            await websocket.close(code=1008)
+            return
+
+        chk = await session.execute(
+            select(GroupMember).where(GroupMember.group_id == group_id, GroupMember.user_id == sender.id)
+        )
+        if chk.scalar_one_or_none() is None:
+            await websocket.close(code=1008)
+            return
+
+    await manager.connect(sender.id, websocket)
+    try:
+        while True:
+            payload = await websocket.receive_json()
+            if await relay_call_signal(payload, sender.id, None):
+                continue
+
+            content = MessageCreate.model_validate(payload).content.strip()
+            if not content or len(content) > 2000:
+                await websocket.send_json({
+                    "type": "error",
+                    "message": "Message must be 1 to 2000 characters.",
+                })
+                continue
+
+            async with SessionLocal() as session:
+                group_msg = GroupMessage(
+                    group_id=group_id,
+                    sender_id=sender.id,
+                    content=content,
+                )
+                session.add(group_msg)
+                await session.commit()
+                await session.refresh(group_msg)
+
+                mq = select(GroupMember.user_id).where(GroupMember.group_id == group_id)
+                member_ids = (await session.execute(mq)).scalars().all()
+
+                event = {
+                    "type": "group_message",
+                    "id": group_msg.id,
+                    "group_id": group_id,
+                    "sender_id": sender.id,
+                    "sender_username": sender.username,
+                    "content": content,
+                    "created_at": group_msg.created_at.isoformat(),
+                }
+                for mid in member_ids:
+                    await manager.send_message(mid, event)
+    except WebSocketDisconnect:
+        manager.disconnect(sender.id, websocket)
+
+
 @app.get("/")
 async def chat_page():
     return FileResponse(os.path.join(BASE_DIR, "templates", "index.html"))
@@ -348,7 +524,52 @@ async def relay_call_signal(payload: dict, sender_id: int, default_target_id: in
     if signal_type not in CALL_SIGNAL_TYPES:
         return False
 
-    print("payload------------------------------------->", payload)
+    # call_invite: broadcast to multiple target_ids (group call)
+    if signal_type == "call_invite":
+        target_ids = payload.get("target_ids", [])
+        # also support a single target_id for backwards compat
+        single = payload.get("target_id")
+        if single is not None:
+            try:
+                target_ids = list(target_ids) + [int(single)]
+            except (TypeError, ValueError):
+                pass
+        event = {
+            "type": "call_invite",
+            "sender_id": sender_id,
+            "sender_username": payload.get("sender_username"),
+            "sender_email": payload.get("sender_email", ""),
+            "room_name": payload.get("room_name", ""),
+            "participant_names": payload.get("participant_names", []),
+            "group_name": payload.get("group_name", ""),
+        }
+        for tid in target_ids:
+            try:
+                tid = int(tid)
+            except (TypeError, ValueError):
+                continue
+            if tid != sender_id:
+                await manager.send_message(tid, event)
+        return True
+
+    # call_leave: notify single peer that sender left a LiveKit room
+    if signal_type == "call_leave":
+        target_id = payload.get("target_id", default_target_id)
+        try:
+            target_id = int(target_id)
+        except (TypeError, ValueError):
+            return True
+        event = {
+            "type": "call_leave",
+            "sender_id": sender_id,
+            "sender_username": payload.get("sender_username"),
+            "room_name": payload.get("room_name", ""),
+        }
+        if target_id != sender_id:
+            await manager.send_message(target_id, event)
+        return True
+
+    # Legacy P2P signals (call_offer, call_answer, call_ice, call_reject, call_end)
     target_id = payload.get("target_id", default_target_id)
     try:
         target_id = int(target_id)
@@ -387,10 +608,55 @@ async def signaling_endpoint(
     try:
         while True:
             payload = await websocket.receive_json()
-            print("payload in signaling-endpoint------------------------------------------", payload)
             await relay_call_signal(payload, user_pk, payload.get("target_id"))
     except WebSocketDisconnect:
         manager.disconnect(user_pk, websocket)
+
+
+class LiveKitTokenRequest(BaseModel):
+    room_name: str = ""
+
+
+@app.post("/api/livekit/token")
+async def livekit_token(
+    body: LiveKitTokenRequest,
+    authorization: str | None = Header(default=None),
+):
+    """
+    Issue a LiveKit access token for the authenticated user.
+    Accepts an optional room_name; generates a UUID room if not provided.
+    Returns the JWT token, the LiveKit server URL, and the room name.
+    """
+    if not LIVEKIT_API_KEY or not LIVEKIT_API_SECRET:
+        raise HTTPException(503, "LiveKit is not configured on the server.")
+
+    user = await authenticated_user(authorization)
+    print("user---------------->", user)
+
+    room = body.room_name.strip() or str(uuid.uuid4())
+    print("room---------------->", room)
+
+    token = (
+        livekit_api.AccessToken(
+            LIVEKIT_API_KEY,
+            LIVEKIT_API_SECRET,
+        )
+        .with_identity(str(user.id))
+        .with_name(format_username(user.username))
+        .with_grants(
+            livekit_api.VideoGrants(
+                room_join=True,
+                room=room,
+            )
+        )
+        .to_jwt()
+    )
+
+    return {
+        "token": token,
+        "server_url": LIVEKIT_URL,
+        "room_name": room,
+    }
 
 
 @app.websocket("/ws/{receiver_id}")
@@ -1017,3 +1283,138 @@ async def list_stored_reports():
         "stored_count": len(call_reports),
         "call_ids": list(call_reports.keys()),
     }
+
+@app.post("/api/call-summary/group")
+async def call_summary_group(
+    authorization: str | None = Header(default=None),
+    local_audio: UploadFile | None = File(default=None),
+    remote_audio: UploadFile | None = File(default=None),
+    group_name: str = "",
+    member_names: str = "",
+    member_emails: str = "[]",
+    call_start: str = "",
+    call_end: str = "",
+    call_events: str = "",
+    target_email: str = "",
+    caller_email: str = "",
+    receiver_email: str = "",
+):
+    """Summarise a group video call.
+
+    ``member_emails`` should be a JSON‑encoded list of email addresses.
+    ``member_names`` is a comma‑separated list of display names.
+    The payload is extended with ``group_name`` and the members' details before
+    being sent to the existing n8n workflow.
+    """
+    # Re‑use the existing 1‑on‑1 logic with additional group data
+    user = await authenticated_user(authorization)
+
+    # Transcribe both sides concurrently
+    local_text, remote_text = await asyncio.gather(
+        _transcribe_upload(local_audio),
+        _transcribe_upload(remote_audio),
+    )
+
+    my_display = user.username
+    my_mail = caller_email or user.email or ""
+    email_destination = target_email or receiver_email or my_mail
+
+    # Build basic transcript
+    transcript_lines = []
+    if local_text:
+        transcript_lines.append(f"{my_display}: {local_text}")
+    if remote_text:
+        transcript_lines.append(f"Group: {remote_text}")
+    full_transcript = "\n".join(transcript_lines) or "(No speech detected)"
+
+    # Duration handling (same as 1‑on‑1)
+    duration_str = "Not available"
+    try:
+        from datetime import datetime as _dt
+        fmt = "%Y-%m-%dT%H:%M:%S.%fZ"
+        t_start = _dt.strptime(call_start.replace("Z", "Z"), fmt) if call_start else None
+        t_end = _dt.strptime(call_end.replace("Z", "Z"), fmt) if call_end else None
+        if t_start and t_end:
+            delta = t_end - t_start
+            mins, secs = divmod(int(delta.total_seconds()), 60)
+            duration_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+    except Exception:
+        pass
+
+    # Participants – caller + members
+    participants = [{"name": my_display, "email": my_mail, "role": "caller"}]
+    try:
+        emails = json.loads(member_emails or "[]")
+    except Exception:
+        emails = []
+    names = [n.strip() for n in (member_names or "").split(",") if n.strip()]
+    for idx, email in enumerate(emails):
+        name = names[idx] if idx < len(names) else email
+        participants.append({"name": name, "email": email, "role": "member"})
+
+    # Important events – reuse minimal synthesis if missing
+    important_events = []
+    try:
+        if call_events:
+            important_events = json.loads(call_events)
+    except Exception:
+        pass
+    if not important_events:
+        if call_start:
+            important_events.append({"time": call_start, "event": "Call started", "participant": my_display})
+        if call_end:
+            important_events.append({"time": call_end, "event": "Call ended", "participant": my_display})
+
+    payload = {
+        "call_id": str(uuid.uuid4()),
+        "caller": my_display,
+        "caller_email": my_mail,
+        "receiver": "",
+        "receiver_email": "",
+        "email": email_destination,
+        "to_email": email_destination,
+        "participants": participants,
+        "call_start": call_start or "Not available",
+        "call_end": call_end or "Not available",
+        "call_duration": duration_str,
+        "local_transcript": local_text or "(no speech)",
+        "remote_transcript": remote_text or "(no speech)",
+        "full_transcript": full_transcript,
+        "important_events": important_events,
+        "group_name": group_name,
+        "member_names": member_names,
+        "member_emails": member_emails,
+        "decisions": [],
+        "action_items": [],
+        "technical_issues": [],
+    }
+
+    # Store report for later retrieval
+    if len(call_reports) >= MAX_CALL_REPORTS:
+        oldest_key = next(iter(call_reports))
+        del call_reports[oldest_key]
+    call_reports[payload["call_id"]] = payload
+
+    print(f"[call-summary] Stored group report id={payload['call_id']} group={group_name}")
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            n8n_resp = await client.post(N8N_WEBHOOK_URL, json=payload)
+        n8n_resp.raise_for_status()
+        print(f"[call-summary] n8n responded: {n8n_resp.status_code}")
+    except httpx.HTTPStatusError as e:
+        print(f"[call-summary] n8n HTTP error: {e.response.status_code} {e.response.text}")
+        raise HTTPException(502, f"n8n returned {e.response.status_code}")
+    except Exception as e:
+        print(f"[call-summary] n8n request failed: {e}")
+        raise HTTPException(502, "Could not reach n8n webhook")
+
+    return {
+        "ok": True,
+        "call_id": payload["call_id"],
+        "group_name": group_name,
+        "duration": duration_str,
+        "transcript": full_transcript,
+        "n8n_status": n8n_resp.status_code,
+    }
+

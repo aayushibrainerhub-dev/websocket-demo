@@ -40,3 +40,48 @@ class Message(Base):
 	receiver: Mapped[User] = relationship(
 		foreign_keys=[receiver_id], back_populates="received_messages"
 	)
+
+
+class Group(Base):
+	__tablename__ = "groups"
+
+	id: Mapped[int] = mapped_column(Integer, primary_key=True)
+	name: Mapped[str] = mapped_column(String(100))
+	created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+	created_at: Mapped[datetime] = mapped_column(
+		DateTime(timezone=True), server_default=func.now()
+	)
+	creator: Mapped[User] = relationship(foreign_keys=[created_by])
+	members: Mapped[list["GroupMember"]] = relationship(
+		back_populates="group", cascade="all, delete-orphan"
+	)
+	messages: Mapped[list["GroupMessage"]] = relationship(
+		back_populates="group", cascade="all, delete-orphan"
+	)
+
+
+class GroupMember(Base):
+	__tablename__ = "group_members"
+
+	id: Mapped[int] = mapped_column(Integer, primary_key=True)
+	group_id: Mapped[int] = mapped_column(ForeignKey("groups.id"), index=True)
+	user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+	joined_at: Mapped[datetime] = mapped_column(
+		DateTime(timezone=True), server_default=func.now()
+	)
+	group: Mapped[Group] = relationship(back_populates="members")
+	user: Mapped[User] = relationship(foreign_keys=[user_id])
+
+
+class GroupMessage(Base):
+	__tablename__ = "group_messages"
+
+	id: Mapped[int] = mapped_column(Integer, primary_key=True)
+	group_id: Mapped[int] = mapped_column(ForeignKey("groups.id"), index=True)
+	sender_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+	content: Mapped[str] = mapped_column(Text)
+	created_at: Mapped[datetime] = mapped_column(
+		DateTime(timezone=True), server_default=func.now()
+	)
+	group: Mapped[Group] = relationship(back_populates="messages")
+	sender: Mapped[User] = relationship(foreign_keys=[sender_id])

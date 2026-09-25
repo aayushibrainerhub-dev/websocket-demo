@@ -25,3 +25,8 @@ class Credentials(BaseModel):
 
 class MessageCreate(BaseModel):
     content: str
+
+
+class CreateGroupRequest(BaseModel):
+    name: str
+    member_ids: list[int]
