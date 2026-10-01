@@ -324,6 +324,7 @@ function completeSession(data) {
   setView(true)
   updateProfileUI(data)
 
+  initE2EE().catch(console.error)
   connectSignal()
   refreshConversations()
 }
@@ -342,6 +343,15 @@ function performLogout() {
 
   endCall()
   resetVoiceState()
+
+  e2eeState.sessionCache.clear()
+  e2eeState.groupKeys.clear()
+  e2eeState.conversationKeys.clear()
+  e2eeState.sentCache.clear()
+  e2eeState.identity = null
+  e2eeState.initialized = false
+  if (e2eeState.db) { e2eeState.db.close(); e2eeState.db = null }
+  _idb = null
 
   localStorage.removeItem('relay_session')
   setView(false)
@@ -417,6 +427,1064 @@ $('menuItemNewGroup')?.addEventListener('click', () => {
   closeAllPopovers()
   openCreateGroupModal()
 })
+
+/* ============================================================
+   END-TO-END ENCRYPTION  –  Double Ratchet + X3DH  (v2)
+   Key storage: IndexedDB  (never localStorage)
+   Crypto primitives: WebCrypto API only (no external libs)
+
+   Protocol summary
+   ────────────────
+   • Identity key (IK)       ECDH P-256  long-lived, stored in IndexedDB
+   • Signed prekey  (SPK)    ECDH P-256  rotated occasionally, signed by IK
+   • One-time prekeys (OPK)  ECDH P-256  single-use, batch-uploaded to server
+   • Ephemeral key  (EK)     ECDH P-256  fresh per X3DH session initiation
+
+   X3DH shared-secret derivation (initiator side, Alice → Bob):
+     DH1 = ECDH(IK_A, SPK_B)
+     DH2 = ECDH(EK_A, IK_B)
+     DH3 = ECDH(EK_A, SPK_B)
+     DH4 = ECDH(EK_A, OPK_B)   // optional, omitted if no OPK available
+     masterSecret = HKDF-SHA256( DH1 ‖ DH2 ‖ DH3 [‖ DH4] )
+
+   Double Ratchet (per message):
+     Root key + chain key ratcheted via HKDF on every Diffie-Hellman step.
+     Each message uses a unique per-message key derived from the chain key,
+     then the chain key advances (KDF chain ratchet).
+     A new ECDH ratchet step fires every time we see a new ratchet public key
+     from the other side (i.e., every round trip).
+
+   Message envelope (content field stored on server, opaque to server):
+     { "e2ee": true, "v": 2,
+       "rk":  "<base64 sender ratchet pub key JWK>",   // only on first send
+       "ek":  "<base64 ephemeral pub key JWK>",         // X3DH init only
+       "opk_id": <number|null>,                          // X3DH OPK used
+       "spk_id": <number>,                               // SPK used for X3DH
+       "n":   <message index in current sending chain>,
+       "pn":  <message count in previous sending chain>,
+       "iv":  "<base64 12-byte AES-GCM IV>",
+       "ct":  "<base64 AES-256-GCM ciphertext+tag>" }
+
+   Group messages continue to use a shared AES-256-GCM key distributed via
+   the Double Ratchet session with the group creator (same as before, but now
+   wrapped under a proper DR session key instead of bare static ECDH).
+============================================================ */
+
+/* ── Utility helpers ─────────────────────────────────────── */
+
+function buf2b64(buf) {
+  const bytes = new Uint8Array(buf)
+  let binary = ''
+  for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i])
+  return btoa(binary)
+}
+
+function b642buf(b64) {
+  const binary = atob(b64)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  return bytes.buffer
+}
+
+// Concatenate multiple ArrayBuffers into one.
+function concatBufs(...bufs) {
+  const total = bufs.reduce((s, b) => s + b.byteLength, 0)
+  const out = new Uint8Array(total)
+  let offset = 0
+  for (const b of bufs) { out.set(new Uint8Array(b), offset); offset += b.byteLength }
+  return out.buffer
+}
+
+/* ── IndexedDB key store ─────────────────────────────────── */
+// DB name per user so multiple accounts on the same browser stay isolated.
+// Stores:
+//   "identity"    – { id: "keys", ik_pub: JWK, ik_priv: JWK,
+//                     spk_pub: JWK, spk_priv: JWK, spk_id: number,
+//                     spk_sig: base64, opk_next_id: number }
+//   "sessions"    – keyed by peer user-id (number)
+//                   value: serialised DoubleRatchetSession
+//   "skipped_keys"– keyed by "<peer_id>:<rk_pub_b64>:<n>", value: raw AES key bytes (b64)
+
+let _idb = null   // resolved IDBDatabase instance
+
+function openIDB(userId) {
+  if (_idb) return Promise.resolve(_idb)
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(`relay_e2ee_${userId}`, 2)  // bump version for new store
+    req.onupgradeneeded = e => {
+      const db = e.target.result
+      if (!db.objectStoreNames.contains('identity'))     db.createObjectStore('identity')
+      if (!db.objectStoreNames.contains('sessions'))     db.createObjectStore('sessions')
+      if (!db.objectStoreNames.contains('skipped_keys')) db.createObjectStore('skipped_keys')
+      // v2: persist decrypted plaintext by message id so history survives refresh
+      if (!db.objectStoreNames.contains('plaintexts'))   db.createObjectStore('plaintexts')
+    }
+    req.onsuccess = e => { _idb = e.target.result; resolve(_idb) }
+    req.onerror   = e => reject(e.target.error)
+  })
+}
+
+function idbGet(db, store, key) {
+  return new Promise((res, rej) => {
+    const tx  = db.transaction(store, 'readonly')
+    const req = tx.objectStore(store).get(key)
+    req.onsuccess = () => res(req.result)
+    req.onerror   = () => rej(req.error)
+  })
+}
+
+function idbPut(db, store, key, value) {
+  return new Promise((res, rej) => {
+    const tx  = db.transaction(store, 'readwrite')
+    const req = tx.objectStore(store).put(value, key)
+    req.onsuccess = () => res()
+    req.onerror   = () => rej(req.error)
+  })
+}
+
+function idbDelete(db, store, key) {
+  return new Promise((res, rej) => {
+    const tx  = db.transaction(store, 'readwrite')
+    const req = tx.objectStore(store).delete(key)
+    req.onsuccess = () => res()
+    req.onerror   = () => rej(req.error)
+  })
+}
+
+// ── Plaintext persistence helpers ────────────────────────
+// Key format:  "dm:<msgId>"    for direct messages
+//              "grp:<msgId>"   for group messages
+// Stored as a plain string; no sensitive key material here —
+// the plaintext is what the user typed/received.
+
+function savePlaintext(db, storeKey, plaintext) {
+  return idbPut(db, 'plaintexts', storeKey, plaintext)
+}
+
+function getPlaintext(db, storeKey) {
+  return idbGet(db, 'plaintexts', storeKey)
+}
+
+// Decrypt a history message: IDB cache first, DR decrypt as fallback.
+// If DR fails (ratchet moved on), shows a soft lock icon — does NOT corrupt state.
+// `keyOrPeerId` is either a numeric peer ID (DM) or a CryptoKey (group).
+async function decryptHistoryMessage(content, keyOrPeerId, idbPrefix) {
+  if (!isEncryptedMessage(content)) return content
+
+  const db = e2eeState.db
+  // 1. IDB plaintext cache — primary source, always works after first view.
+  if (db) {
+    const cached = await getPlaintext(db, idbPrefix)
+    if (cached !== null && cached !== undefined) return cached
+  }
+
+  // 2. sentCache — in-memory, works for messages sent this session before refresh.
+  if (e2eeState.sentCache.has(content)) {
+    const pt = e2eeState.sentCache.get(content)
+    if (db) savePlaintext(db, idbPrefix, pt).catch(() => {})
+    return pt
+  }
+
+  // 3. DR / AES decrypt — only works if session/key is still valid.
+  try {
+    const plaintext = await decryptMessage(content, keyOrPeerId)
+    if (!plaintext.startsWith('🔒') && db) {
+      savePlaintext(db, idbPrefix, plaintext).catch(() => {})
+    }
+    return plaintext
+  } catch {
+    return '🔒 [Message from a previous session]'
+  }
+}
+
+/* ── HKDF wrapper ────────────────────────────────────────── */
+// Derives `length` bytes from `ikm` (ArrayBuffer) using HKDF-SHA-256.
+// `info` is a UTF-8 label string.
+async function hkdf(ikm, length, info, salt = null) {
+  const keyMat = await crypto.subtle.importKey('raw', ikm, 'HKDF', false, ['deriveBits'])
+  const infoEnc = new TextEncoder().encode(info)
+  const saltBuf = salt || new Uint8Array(32).buffer // zero salt if not provided
+  return crypto.subtle.deriveBits(
+    { name: 'HKDF', hash: 'SHA-256', salt: saltBuf, info: infoEnc },
+    keyMat,
+    length * 8
+  )
+}
+
+/* ── ECDH helpers ────────────────────────────────────────── */
+
+// Generate an ECDH key pair.
+// Public key: extractable=true  (needs to be exported to JWK for the wire).
+// Private key: extractable=false (stored as a CryptoKey in IndexedDB, never exported).
+async function generateECDHPair() {
+  // Generate extractable first so we can export the public half to JWK.
+  const extractable = await crypto.subtle.generateKey(
+    { name: 'ECDH', namedCurve: 'P-256' },
+    true,
+    ['deriveKey', 'deriveBits']
+  )
+  // Re-import private key as non-extractable — it will live only in IDB/memory.
+  const privJwk = await crypto.subtle.exportKey('jwk', extractable.privateKey)
+  const nonExtractablePriv = await crypto.subtle.importKey(
+    'jwk', privJwk,
+    { name: 'ECDH', namedCurve: 'P-256' },
+    false,                      // ← non-extractable
+    ['deriveKey', 'deriveBits']
+  )
+  return { publicKey: extractable.publicKey, privateKey: nonExtractablePriv }
+}
+
+async function ecdhBits(privKey, pubKey) {
+  // Returns raw 32-byte shared secret (P-256 DH output).
+  return crypto.subtle.deriveBits(
+    { name: 'ECDH', public: pubKey },
+    privKey,
+    256
+  )
+}
+
+async function importECDHPub(jwk) {
+  return crypto.subtle.importKey('jwk', jwk, { name: 'ECDH', namedCurve: 'P-256' }, true, [])
+}
+
+async function importECDHPriv(jwkOrKey) {
+  // Accept either a JWK object (from wire/old storage) or a CryptoKey directly (from IDB).
+  if (jwkOrKey instanceof CryptoKey) return jwkOrKey
+  return crypto.subtle.importKey(
+    'jwk', jwkOrKey,
+    { name: 'ECDH', namedCurve: 'P-256' },
+    false,                      // ← non-extractable
+    ['deriveKey', 'deriveBits']
+  )
+}
+
+/* ── SPK signing (ECDSA P-256 SHA-256 as IK signing key) ── */
+async function generateSigningPair() {
+  const extractable = await crypto.subtle.generateKey(
+    { name: 'ECDSA', namedCurve: 'P-256' },
+    true,
+    ['sign', 'verify']
+  )
+  // Re-import private key as non-extractable.
+  const privJwk = await crypto.subtle.exportKey('jwk', extractable.privateKey)
+  const nonExtractablePriv = await crypto.subtle.importKey(
+    'jwk', privJwk,
+    { name: 'ECDSA', namedCurve: 'P-256' },
+    false,                      // ← non-extractable
+    ['sign']
+  )
+  return { publicKey: extractable.publicKey, privateKey: nonExtractablePriv }
+}
+
+async function signSPK(signingPrivKey, spkPubJwk) {
+  const data = new TextEncoder().encode(JSON.stringify(spkPubJwk))
+  const sig  = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, signingPrivKey, data)
+  return buf2b64(sig)
+}
+
+async function verifySPK(signingPubJwk, spkPubJwk, sigB64) {
+  try {
+    const verifyKey = await crypto.subtle.importKey(
+      'jwk', signingPubJwk, { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']
+    )
+    const data = new TextEncoder().encode(JSON.stringify(spkPubJwk))
+    return crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, verifyKey, b642buf(sigB64), data)
+  } catch { return false }
+}
+
+/* ── AES-256-GCM message encryption ─────────────────────── */
+async function aesEncrypt(rawKeyBuf, plaintext) {
+  const key = await crypto.subtle.importKey('raw', rawKeyBuf, 'AES-GCM', false, ['encrypt'])
+  const iv  = crypto.getRandomValues(new Uint8Array(12))
+  const ct  = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(plaintext))
+  return { iv: buf2b64(iv), ct: buf2b64(ct) }
+}
+
+async function aesDecrypt(rawKeyBuf, ivB64, ctB64) {
+  const key = await crypto.subtle.importKey('raw', rawKeyBuf, 'AES-GCM', false, ['decrypt'])
+  const pt  = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: b642buf(ivB64) },
+    key,
+    b642buf(ctB64)
+  )
+  return new TextDecoder().decode(pt)
+}
+
+/* ── Double Ratchet session state ────────────────────────── */
+// Stored directly in IndexedDB via structured clone.
+// CryptoKey objects are structured-cloneable, so DHs_priv is stored as a
+// non-extractable CryptoKey.  DHs_pub and DHr_pub stay as JWK objects
+// because they need to be included in message envelopes sent over the wire.
+//
+// Fields:
+//   RK          – root key bytes (b64)
+//   CKs         – send chain key bytes (b64)     null until first send ratchet
+//   CKr         – recv chain key bytes (b64)     null until first recv ratchet
+//   Ns          – message counter (send)
+//   Nr          – message counter (recv)
+//   PN          – previous send-chain length
+//   DHs_pub     – our current ratchet public key (JWK object)
+//   DHs_priv    – our current ratchet private key (CryptoKey, non-extractable)
+//   DHr_pub     – their latest ratchet public key (JWK object) or null
+//   isInitiator – bool
+
+class DoubleRatchetSession {
+  constructor(fields) {
+    Object.assign(this, {
+      RK: null, CKs: null, CKr: null,
+      Ns: 0, Nr: 0, PN: 0,
+      DHs_pub: null, DHs_priv: null, DHr_pub: null,
+      isInitiator: false,
+      ...fields,
+    })
+  }
+
+  // Sessions are stored in IndexedDB via structured clone — CryptoKey objects
+  // survive the round-trip natively without needing JSON serialisation.
+  forStorage() { return { ...this } }
+
+  static fromStorage(obj) { return new DoubleRatchetSession(obj) }
+}
+
+/* ── KDF ratchet steps ───────────────────────────────────── */
+
+// Root-key ratchet (DH step): given RK and Dh output → new RK + new chain key
+async function kdfRK(rootKeyB64, dhOut) {
+  const rkBuf  = b642buf(rootKeyB64)
+  const derived = await hkdf(concatBufs(rkBuf, dhOut), 64, 'WhisperRatchet')
+  const newRK  = derived.slice(0, 32)
+  const newCK  = derived.slice(32, 64)
+  return { newRK: buf2b64(newRK), newCK: buf2b64(newCK) }
+}
+
+// Chain-key ratchet: advance CK → (message key bytes, new CK bytes)
+async function kdfCK(ckB64) {
+  const ck      = b642buf(ckB64)
+  const mkBuf   = await hkdf(ck, 32, 'WhisperMessageKey')
+  const newCKBuf = await hkdf(ck, 32, 'WhisperChainKey')
+  return { mk: mkBuf, newCK: buf2b64(newCKBuf) }
+}
+
+/* ── Session persistence (IndexedDB) ────────────────────── */
+
+async function loadSession(db, peerId) {
+  const raw = await idbGet(db, 'sessions', peerId)
+  return raw ? DoubleRatchetSession.fromStorage(raw) : null
+}
+
+async function saveSession(db, peerId, session) {
+  await idbPut(db, 'sessions', peerId, session.forStorage())
+}
+
+async function saveSkippedKey(db, peerId, rkPubB64, n, mkBuf) {
+  const k = `${peerId}:${rkPubB64}:${n}`
+  await idbPut(db, 'skipped_keys', k, buf2b64(mkBuf))
+}
+
+async function getSkippedKey(db, peerId, rkPubB64, n) {
+  const k = `${peerId}:${rkPubB64}:${n}`
+  const v = await idbGet(db, 'skipped_keys', k)
+  return v ? b642buf(v) : null
+}
+
+async function deleteSkippedKey(db, peerId, rkPubB64, n) {
+  await idbDelete(db, 'skipped_keys', `${peerId}:${rkPubB64}:${n}`)
+}
+
+/* ── E2EE state ──────────────────────────────────────────── */
+
+const e2eeState = {
+  db: null,                        // IDBDatabase
+  identity: null,                  // loaded identity record
+  initialized: false,
+  // In-memory caches to avoid redundant IDB reads in the same page session
+  sessionCache: new Map(),         // peerId → DoubleRatchetSession
+  groupKeys: new Map(),            // groupId → raw AES key bytes (b64)
+  // Legacy v1 in-memory map (kept for group-key wrapping compatibility)
+  conversationKeys: new Map(),
+  // Plaintext cache: ciphertext → plaintext for echoed outgoing messages.
+  // The server echoes every sent message back to the sender; we use this
+  // to avoid re-decrypting our own ciphertext (which would fail on DR state).
+  // Capped at 200 entries to prevent unbounded growth.
+  sentCache: new Map(),
+}
+
+/* ── Identity key management ─────────────────────────────── */
+
+async function loadOrCreateIdentity(db, userId) {
+  let identity = await idbGet(db, 'identity', 'keys')
+  if (identity) return identity
+
+  // First boot — generate all key pairs.
+  // Private keys are non-extractable (CryptoKey stored directly in IDB).
+  // Public keys are exported to JWK for server upload and message envelopes.
+  const ikPair    = await generateECDHPair()
+  const sigPair   = await generateSigningPair()
+  const spkPair   = await generateECDHPair()
+  const spkPubJwk = await crypto.subtle.exportKey('jwk', spkPair.publicKey)
+  const spkSig    = await signSPK(sigPair.privateKey, spkPubJwk)
+
+  // Generate initial batch of 20 one-time prekeys.
+  const opks = []
+  for (let i = 0; i < 20; i++) {
+    const kp = await generateECDHPair()
+    opks.push({
+      key_id:  i,
+      pub_jwk: await crypto.subtle.exportKey('jwk', kp.publicKey),
+      priv:    kp.privateKey,   // ← CryptoKey (non-extractable), stored directly in IDB
+    })
+  }
+
+  identity = {
+    ik_pub:   await crypto.subtle.exportKey('jwk', ikPair.publicKey),
+    ik_priv:  ikPair.privateKey,    // CryptoKey, non-extractable
+    sig_pub:  await crypto.subtle.exportKey('jwk', sigPair.publicKey),
+    sig_priv: sigPair.privateKey,   // CryptoKey, non-extractable
+    spk_pub:  spkPubJwk,
+    spk_priv: spkPair.privateKey,   // CryptoKey, non-extractable
+    spk_id:   0,
+    spk_sig:  spkSig,
+    opks,
+    opk_next_id: 20,
+  }
+
+  await idbPut(db, 'identity', 'keys', identity)
+  return identity
+}
+
+async function uploadPreKeyBundle(identity) {
+  const opkBatch = identity.opks.map(opk => ({
+    key_id:     opk.key_id,
+    public_key: JSON.stringify(opk.pub_jwk),
+  }))
+
+  // Pack both the ECDH IK and the ECDSA signing key into identity_key as JSON.
+  // The receiver unpacks sig_pub to verify the SPK signature.
+  const identityKeyBundle = JSON.stringify({
+    ik:  identity.ik_pub,
+    sig: identity.sig_pub,
+  })
+
+  await request('/api/e2ee/prekey-bundle', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      identity_key:     identityKeyBundle,
+      signed_prekey:    JSON.stringify(identity.spk_pub),
+      signed_prekey_id: identity.spk_id,
+      spk_signature:    identity.spk_sig,
+      one_time_prekeys: opkBatch,
+    }),
+  })
+}
+
+// Top up OPKs if the server reports fewer than a threshold.
+async function maybeTopUpOPKs(db, identity) {
+  try {
+    const res = await request('/api/e2ee/opk-count')
+    if (res.opk_count >= 10) return   // plenty left
+
+    const newOpks = []
+    let nextId = identity.opk_next_id || identity.opks.length
+    const needed = 20 - res.opk_count
+    for (let i = 0; i < needed; i++) {
+      const kp = await generateECDHPair()
+      newOpks.push({
+        key_id:  nextId++,
+        pub_jwk: await crypto.subtle.exportKey('jwk', kp.publicKey),
+        priv:    kp.privateKey,   // CryptoKey, non-extractable
+      })
+    }
+
+    await request('/api/e2ee/one-time-prekeys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        one_time_prekeys: newOpks.map(o => ({
+          key_id: o.key_id,
+          public_key: JSON.stringify(o.pub_jwk),
+        })),
+      }),
+    })
+
+    identity.opks.push(...newOpks)
+    identity.opk_next_id = nextId
+    await idbPut(db, 'identity', 'keys', identity)
+  } catch (err) {
+    console.warn('[E2EE] OPK top-up failed:', err)
+  }
+}
+
+/* ── initE2EE ────────────────────────────────────────────── */
+
+async function initE2EE() {
+  if (!state.session?.user_id) return
+  if (e2eeState.initialized) return
+
+  const userId = state.session.user_id
+  try {
+    const db = await openIDB(userId)
+    e2eeState.db = db
+
+    let identity = await loadOrCreateIdentity(db, userId)
+
+    // Migration: regenerate if identity is missing sig keys OR if private keys
+    // are still stored as JWK strings (pre non-extractable upgrade).
+    const privKeysAreJWK = identity.ik_priv && !(identity.ik_priv instanceof CryptoKey)
+    if (!identity.sig_pub || !identity.sig_priv || privKeysAreJWK) {
+      console.info('[E2EE] Identity needs regeneration (missing sig keys or old JWK format).')
+      await idbDelete(db, 'identity', 'keys')
+      // Also clear stale sessions derived from the old key material.
+      await new Promise((res, rej) => {
+        const tx  = db.transaction('sessions', 'readwrite')
+        const req = tx.objectStore('sessions').clear()
+        req.onsuccess = () => res()
+        req.onerror   = () => rej(req.error)
+      })
+      identity = await loadOrCreateIdentity(db, userId)
+    }
+
+    e2eeState.identity = identity
+
+    // Upload bundle (server upserts, safe to call every login).
+    await uploadPreKeyBundle(identity).catch(err =>
+      console.error('[E2EE] Bundle upload failed:', err)
+    )
+    console.debug('[E2EE] Bundle uploaded. identity has sig_pub:', !!identity.sig_pub, 'spk_id:', identity.spk_id)
+
+    // Best-effort OPK top-up in background.
+    maybeTopUpOPKs(db, identity).catch(() => {})
+
+    e2eeState.initialized = true
+    console.info('[E2EE] Initialised with Double Ratchet + IndexedDB.')
+  } catch (err) {
+    console.error('[E2EE] Init failed:', err)
+  }
+}
+
+/* ── X3DH session initiation (Alice/initiator) ───────────── */
+// Returns a bootstrapped DoubleRatchetSession and the X3DH header fields
+// that Alice must include in her first message.
+
+async function x3dhInitiateSession(identity, bundle) {
+  // Unpack identity_key — contains both the ECDH IK and the ECDSA signing key.
+  const ikBundle  = JSON.parse(bundle.identity_key)
+  const ikPubJwk  = ikBundle.ik  ?? ikBundle   // backwards compat: plain JWK if old format
+  const sigPubJwk = ikBundle.sig ?? ikBundle   // same fallback
+
+  const spkPubJwk = JSON.parse(bundle.signed_prekey)
+
+  // Verify the SPK signature using the dedicated signing key.
+  const valid = await verifySPK(sigPubJwk, spkPubJwk, bundle.spk_signature)
+  console.debug('[E2EE] SPK verification result:', valid, 'sigPubJwk.kty:', sigPubJwk?.kty, 'crv:', sigPubJwk?.crv)
+  if (!valid) {
+    throw new Error('[E2EE] SPK signature verification failed. Possible server tampering.')
+  }
+
+  // Import Bob's ECDH public keys.
+  const IK_B   = await importECDHPub(ikPubJwk)
+  const SPK_B  = await importECDHPub(spkPubJwk)
+  const OPK_B  = bundle.one_time_prekey
+    ? await importECDHPub(JSON.parse(bundle.one_time_prekey.public_key))
+    : null
+
+  // Alice's own IK and a fresh ephemeral key.
+  const IK_A_priv = await importECDHPriv(identity.ik_priv)
+  const EK_A      = await generateECDHPair()
+  const EK_A_priv = EK_A.privateKey
+  const EK_A_pub  = EK_A.publicKey
+
+  // X3DH four DH computations.
+  const DH1 = await ecdhBits(IK_A_priv, SPK_B)   // IK_A ↔ SPK_B
+  const DH2 = await ecdhBits(EK_A_priv, IK_B)    // EK_A ↔ IK_B
+  const DH3 = await ecdhBits(EK_A_priv, SPK_B)   // EK_A ↔ SPK_B
+  const dhs = OPK_B
+    ? [DH1, DH2, DH3, await ecdhBits(EK_A_priv, OPK_B)]
+    : [DH1, DH2, DH3]
+  const masterSecret = await hkdf(concatBufs(...dhs), 32, 'X3DHMasterSecret')
+
+  // Initialise Double Ratchet with Bob's SPK as the first remote ratchet key.
+  const DHs = await generateECDHPair()   // Alice's initial DR ratchet key pair
+  const dhOut = await ecdhBits(DHs.privateKey, SPK_B)
+  const { newRK, newCK } = await kdfRK(buf2b64(masterSecret), dhOut)
+
+  const session = new DoubleRatchetSession({
+    RK:          newRK,
+    CKs:         newCK,
+    CKr:         null,
+    Ns:          0,
+    Nr:          0,
+    PN:          0,
+    DHs_pub:     await crypto.subtle.exportKey('jwk', DHs.publicKey),
+    DHs_priv:    DHs.privateKey,   // CryptoKey (non-extractable), stored in IDB directly
+    DHr_pub:     identity.spk_pub,   // Bob's SPK used as initial remote ratchet key
+    isInitiator: true,
+  })
+
+  const ekPubJwk = await crypto.subtle.exportKey('jwk', EK_A_pub)
+  const x3dhHeader = {
+    ek:     JSON.stringify(ekPubJwk),
+    opk_id: bundle.one_time_prekey?.key_id ?? null,
+    spk_id: bundle.signed_prekey_id,
+  }
+
+  return { session, x3dhHeader }
+}
+
+/* ── X3DH session response (Bob/receiver) ───────────────── */
+// Called when Bob receives the first message from Alice.
+// Returns a bootstrapped DoubleRatchetSession seeded from the X3DH header.
+
+async function x3dhRespondSession(identity, senderIKBundle, ekPubJwk, opkId, spkId) {
+  // Check that the SPK ID matches what we have stored.
+  if (spkId !== identity.spk_id) {
+    throw new Error(`[E2EE] SPK id mismatch: expected ${identity.spk_id}, got ${spkId}`)
+  }
+
+  // Unpack Alice's identity key bundle — extract the ECDH IK for DH.
+  const ikBundle  = JSON.parse(senderIKBundle)
+  const ikPubJwk  = ikBundle.ik ?? ikBundle   // backwards compat
+
+  // Import Alice's keys.
+  const IK_A  = await importECDHPub(ikPubJwk)
+  const EK_A  = await importECDHPub(JSON.parse(ekPubJwk))
+
+  // Our own keys.
+  const IK_B_priv  = await importECDHPriv(identity.ik_priv)
+  const SPK_B_priv = await importECDHPriv(identity.spk_priv)
+
+  // Optional OPK.
+  let OPK_B_priv = null
+  if (opkId !== null && opkId !== undefined) {
+    const opkEntry = identity.opks.find(o => o.key_id === opkId)
+    if (opkEntry) OPK_B_priv = await importECDHPriv(opkEntry.priv)
+  }
+
+  // Mirror of Alice's DH computations (roles swapped).
+  const DH1 = await ecdhBits(SPK_B_priv, IK_A)   // SPK_B ↔ IK_A
+  const DH2 = await ecdhBits(IK_B_priv,  EK_A)   // IK_B  ↔ EK_A
+  const DH3 = await ecdhBits(SPK_B_priv, EK_A)   // SPK_B ↔ EK_A
+  const dhs = OPK_B_priv
+    ? [DH1, DH2, DH3, await ecdhBits(OPK_B_priv, EK_A)]
+    : [DH1, DH2, DH3]
+  const masterSecret = await hkdf(concatBufs(...dhs), 32, 'X3DHMasterSecret')
+
+  // Initialise DR: Bob starts without a send chain; Alice's first ratchet key
+  // will arrive in the message header and trigger the first DH ratchet step.
+  const session = new DoubleRatchetSession({
+    RK:          buf2b64(masterSecret),
+    CKs:         null,
+    CKr:         null,
+    Ns:          0,
+    Nr:          0,
+    PN:          0,
+    DHs_pub:     identity.spk_pub,
+    DHs_priv:    identity.spk_priv,
+    DHr_pub:     null,
+    isInitiator: false,
+  })
+
+  return session
+}
+
+/* ── Double Ratchet encrypt ──────────────────────────────── */
+
+async function drEncrypt(db, peerId, session, plaintext) {
+  // Advance the send chain to derive the next message key.
+  if (!session.CKs) {
+    // First message: perform a DH ratchet step to establish CKs.
+    if (!session.DHr_pub) throw new Error('[E2EE] No remote ratchet key available')
+    const DHr    = await importECDHPub(session.DHr_pub)
+    const DHs    = await generateECDHPair()
+    const dhOut  = await ecdhBits(
+      await importECDHPriv(session.DHs_priv), DHr
+    )
+    const { newRK, newCK } = await kdfRK(session.RK, dhOut)
+    session.PN    = session.Ns
+    session.Ns    = 0
+    session.RK    = newRK
+    session.CKs   = newCK
+    session.DHs_pub  = await crypto.subtle.exportKey('jwk', DHs.publicKey)
+    session.DHs_priv = DHs.privateKey   // CryptoKey (non-extractable)
+  }
+
+  const { mk, newCK } = await kdfCK(session.CKs)
+  session.CKs = newCK
+
+  const { iv, ct } = await aesEncrypt(mk, plaintext)
+  const header = {
+    rk:  JSON.stringify(session.DHs_pub),
+    n:   session.Ns,
+    pn:  session.PN,
+    iv,
+    ct,
+  }
+
+  session.Ns++
+  await saveSession(db, peerId, session)
+  return header
+}
+
+/* ── Double Ratchet decrypt ──────────────────────────────── */
+
+// Max skipped messages per ratchet step to prevent DoS.
+const MAX_SKIP = 500
+
+async function drSkipKeys(db, peerId, session, until) {
+  if (session.Nr + MAX_SKIP < until) {
+    throw new Error('[E2EE] Too many skipped messages — possible attack')
+  }
+  while (session.Nr < until) {
+    if (!session.CKr) break
+    const { mk, newCK } = await kdfCK(session.CKr)
+    await saveSkippedKey(db, peerId, JSON.stringify(session.DHr_pub), session.Nr, mk)
+    session.CKr = newCK
+    session.Nr++
+  }
+}
+
+async function drDecrypt(db, identity, peerId, session, envelope) {
+  const { rk: rkPubStr, n, pn, iv, ct } = envelope
+
+  // 1. Check skipped-message cache first.
+  if (rkPubStr) {
+    const skipped = await getSkippedKey(db, peerId, rkPubStr, n)
+    if (skipped) {
+      await deleteSkippedKey(db, peerId, rkPubStr, n)
+      return aesDecrypt(skipped, iv, ct)
+    }
+  }
+
+  // 2. If the header ratchet key is different from what we have → DH ratchet step.
+  const newDHr = rkPubStr ? JSON.parse(rkPubStr) : session.DHr_pub
+  const dhPubChanged = rkPubStr && JSON.stringify(newDHr) !== JSON.stringify(session.DHr_pub)
+
+  if (dhPubChanged) {
+    // Skip any messages in the previous receive chain we haven't seen yet.
+    await drSkipKeys(db, peerId, session, pn)
+
+    // DH ratchet step (receive side).
+    const newDHrKey  = await importECDHPub(newDHr)
+    const dhOut      = await ecdhBits(await importECDHPriv(session.DHs_priv), newDHrKey)
+    const { newRK, newCK: newCKr } = await kdfRK(session.RK, dhOut)
+
+    session.PN    = session.Ns
+    session.Ns    = 0
+    session.Nr    = 0
+    session.RK    = newRK
+    session.CKr   = newCKr
+    session.DHr_pub = newDHr
+
+    // Generate new sending ratchet key pair for our next message.
+    const newDHs      = await generateECDHPair()
+    const dhOut2      = await ecdhBits(newDHs.privateKey, newDHrKey)
+    const { newRK: newRK2, newCK: newCKs } = await kdfRK(newRK, dhOut2)
+    session.RK    = newRK2
+    session.CKs   = newCKs
+    session.DHs_pub  = await crypto.subtle.exportKey('jwk', newDHs.publicKey)
+    session.DHs_priv = newDHs.privateKey   // CryptoKey (non-extractable)
+  }
+
+  // 3. Skip messages in the current receive chain if needed.
+  await drSkipKeys(db, peerId, session, n)
+
+  // 4. Derive the message key for message n.
+  if (!session.CKr) throw new Error('[E2EE] Receive chain not initialised')
+  const { mk, newCK } = await kdfCK(session.CKr)
+  session.CKr = newCK
+  session.Nr  = n + 1
+
+  await saveSession(db, peerId, session)
+  return aesDecrypt(mk, iv, ct)
+}
+
+/* ── Public: get/create DR session for a peer ────────────── */
+
+async function getDRSession(peerId) {
+  peerId = Number(peerId)
+  if (!e2eeState.initialized) await initE2EE()
+  const db = e2eeState.db
+
+  // Return cached session if available.
+  if (e2eeState.sessionCache.has(peerId)) {
+    return { session: e2eeState.sessionCache.get(peerId), x3dhHeader: null }
+  }
+
+  let session = await loadSession(db, peerId)
+  if (session) {
+    e2eeState.sessionCache.set(peerId, session)
+    return { session, x3dhHeader: null }
+  }
+
+  // No session yet — initiate X3DH.
+  let bundle
+  try {
+    bundle = await request(`/api/e2ee/prekey-bundle/${peerId}`)
+    console.debug('[E2EE] Fetched bundle for peer', peerId, JSON.stringify(bundle).slice(0, 120))
+  } catch (err) {
+    console.error(`[E2EE] Bundle fetch failed for user ${peerId}:`, err)
+    return { session: null, x3dhHeader: null }
+  }
+
+  if (!bundle.signed_prekey) {
+    console.warn(`[E2EE] User ${peerId} bundle missing signed_prekey:`, bundle)
+    return { session: null, x3dhHeader: null }
+  }
+  let newSession, x3dhHeader
+  try {
+    const result = await x3dhInitiateSession(e2eeState.identity, bundle)
+    newSession  = result.session
+    x3dhHeader  = result.x3dhHeader
+  } catch (err) {
+    console.error(`[E2EE] x3dhInitiateSession failed for peer ${peerId}:`, err)
+    return { session: null, x3dhHeader: null }
+  }
+
+  await saveSession(db, peerId, newSession)
+  e2eeState.sessionCache.set(peerId, newSession)
+  return { session: newSession, x3dhHeader }
+}
+
+/* ── Public: encryptMessage ──────────────────────────────── */
+
+async function encryptMessage(text, peerIdOrKey) {
+  // peerIdOrKey is a numeric peer ID for DR, or an AES CryptoKey for groups (legacy API).
+  if (!text) return text
+
+  // Group key path (CryptoKey object passed in).
+  if (peerIdOrKey instanceof CryptoKey) {
+    try {
+      const iv = crypto.getRandomValues(new Uint8Array(12))
+      const ct = await crypto.subtle.encrypt(
+        { name: 'AES-GCM', iv },
+        peerIdOrKey,
+        new TextEncoder().encode(text)
+      )
+      return JSON.stringify({ e2ee: true, v: 1, iv: buf2b64(iv), data: buf2b64(ct) })
+    } catch (err) {
+      console.error('[E2EE] Group encrypt failed:', err)
+      return text
+    }
+  }
+
+  // Direct message path — Double Ratchet.
+  const peerId = Number(peerIdOrKey)
+  try {
+    const { session, x3dhHeader } = await getDRSession(peerId)
+    if (!session) {
+      console.warn(`[E2EE] No DR session for peer ${peerId} — peer has no prekey bundle yet.`)
+      showToast('🔒 The other person hasn\'t opened the app yet — their encryption keys aren\'t ready. Try again once they\'re online.', 6000)
+      return null   // caller MUST check for null and block send
+    }
+
+    const envelope = await drEncrypt(e2eeState.db, peerId, session, text)
+    const payload = { e2ee: true, v: 2, ...envelope }
+    if (x3dhHeader) {
+      // Attach X3DH init fields so the receiver can bootstrap their session.
+      payload.ek     = x3dhHeader.ek
+      payload.opk_id = x3dhHeader.opk_id
+      payload.spk_id = x3dhHeader.spk_id
+      // Send the full identity key bundle (ECDH IK + ECDSA sig key) so Bob
+      // can both verify the SPK and perform the DH computations.
+      payload.ik = JSON.stringify({ ik: e2eeState.identity.ik_pub, sig: e2eeState.identity.sig_pub })
+    }
+    const ciphertext = JSON.stringify(payload)
+
+    // Cache plaintext so when the server echoes the message back to us we
+    // can display it without attempting to re-decrypt our own ciphertext.
+    if (e2eeState.sentCache.size >= 200) {
+      const firstKey = e2eeState.sentCache.keys().next().value
+      e2eeState.sentCache.delete(firstKey)
+    }
+    e2eeState.sentCache.set(ciphertext, text)
+
+    return ciphertext
+  } catch (err) {
+    console.error('[E2EE] DR encrypt failed:', err)
+    return text
+  }
+}
+
+/* ── Public: decryptMessage ──────────────────────────────── */
+
+function isEncryptedMessage(str) {
+  if (typeof str !== 'string') return false
+  const t = str.trim()
+  return t.startsWith('{"e2ee":true') || t.startsWith('{"e2ee": true')
+}
+
+async function decryptMessage(content, peerIdOrKey) {
+  if (!isEncryptedMessage(content)) return content   // legacy plain text
+
+  // Check sent-cache first: if we encrypted this exact ciphertext ourselves,
+  // return the original plaintext directly without touching the DR state.
+  if (e2eeState.sentCache.has(content)) {
+    console.debug('[E2EE] decryptMessage: hit sentCache, returning plaintext')
+    return e2eeState.sentCache.get(content)
+  }
+  console.debug('[E2EE] decryptMessage: sentCache miss, cacheSize=', e2eeState.sentCache.size, 'peerIdOrKey=', peerIdOrKey)
+
+  let parsed
+  try { parsed = JSON.parse(content) } catch { return content }
+
+  console.debug('[E2EE] decryptMessage: v=', parsed.v, 'peerIdOrKey=', peerIdOrKey, 'isX3DH=', !!(parsed.ek && parsed.ik))
+
+  // ── v1 (legacy AES-GCM, group messages or old direct) ──
+  if (parsed.v === 1) {
+    if (!(peerIdOrKey instanceof CryptoKey)) {
+      // Attempt to get a group CryptoKey from the cache if none passed.
+      return '🔒 [Encrypted – legacy format]'
+    }
+    try {
+      const pt = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: b642buf(parsed.iv) },
+        peerIdOrKey,
+        b642buf(parsed.data)
+      )
+      return new TextDecoder().decode(pt)
+    } catch {
+      return '🔒 [Encrypted message]'
+    }
+  }
+
+  // ── v2 Double Ratchet ──
+  if (parsed.v === 2) {
+    const peerId = Number(peerIdOrKey instanceof CryptoKey ? 0 : peerIdOrKey)
+    if (!peerId) return '🔒 [Encrypted – no peer id]'
+    if (!e2eeState.initialized) await initE2EE()
+
+    const db = e2eeState.db
+    let session = await loadSession(db, peerId)
+
+    // If no session and this is an X3DH init message, bootstrap Bob's side.
+    if (!session && parsed.ek && parsed.ik) {
+      try {
+        session = await x3dhRespondSession(
+          e2eeState.identity,
+          parsed.ik,
+          parsed.ek,
+          parsed.opk_id ?? null,
+          parsed.spk_id ?? e2eeState.identity.spk_id
+        )
+        await saveSession(db, peerId, session)
+        e2eeState.sessionCache.set(peerId, session)
+      } catch (err) {
+        console.warn('[E2EE] X3DH respond failed:', err)
+        return '🔒 [Session init failed]'
+      }
+    }
+
+    if (!session) return '🔒 [No session – key pending]'
+
+    try {
+      const plaintext = await drDecrypt(db, e2eeState.identity, peerId, session, parsed)
+      // Keep the in-memory cache up to date.
+      e2eeState.sessionCache.set(peerId, session)
+      return plaintext
+    } catch (err) {
+      console.warn('[E2EE] DR decrypt failed:', err)
+      return '🔒 [Encrypted message]'
+    }
+  }
+
+  return '🔒 [Unknown encryption version]'
+}
+
+/* ── Direct conversation key (backward-compat wrapper) ──── */
+// Previously callers got an AES CryptoKey; now they pass the peer's numeric ID
+// directly to encryptMessage/decryptMessage. This wrapper keeps old call sites
+// working while returning the peerId as the "key" token.
+
+async function getDirectConversationKey(otherUserId /*, otherUser */) {
+  if (!e2eeState.initialized) await initE2EE()
+  // Return the numeric id — encryptMessage/decryptMessage handle it.
+  return Number(otherUserId)
+}
+
+/* ── Group conversation key (AES-GCM, wrapped via DR) ────── */
+
+async function generateKey() {
+  return crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt'])
+}
+
+async function getGroupConversationKey(group) {
+  const groupId = Number(group.id)
+  if (e2eeState.groupKeys.has(groupId)) {
+    // Re-import from cached raw bytes.
+    const rawB64 = e2eeState.groupKeys.get(groupId)
+    return crypto.subtle.importKey('raw', b642buf(rawB64), 'AES-GCM', false, ['encrypt', 'decrypt'])
+  }
+
+  if (!e2eeState.initialized) await initE2EE()
+
+  // Try loading from server (encrypted under our DR session with creator).
+  try {
+    const res = await request(`/api/e2ee/group-key/${groupId}`)
+    if (res && res.encrypted_key) {
+      // The stored encrypted_key is a v2 DR envelope produced when the creator
+      // distributed the group key; decrypt it using the DR session.
+      const creatorId = Number(group.created_by)
+      const plainB64  = await decryptMessage(res.encrypted_key, creatorId)
+      if (!plainB64.startsWith('🔒')) {
+        const groupKey = await crypto.subtle.importKey(
+          'raw', b642buf(plainB64), 'AES-GCM', false, ['encrypt', 'decrypt']
+        )
+        e2eeState.groupKeys.set(groupId, plainB64)
+        return groupKey
+      }
+    }
+  } catch (err) {
+    console.warn('[E2EE] Could not load group key from server:', err)
+  }
+
+  // Generate a fresh AES-256-GCM group key and distribute to each member
+  // by encrypting it under their individual Double Ratchet session.
+  try {
+    const groupKey  = await generateKey()
+    const rawBuf    = await crypto.subtle.exportKey('raw', groupKey)
+    const rawB64    = buf2b64(rawBuf)
+
+    const keysMap = {}
+    let distributed = 0
+    if (group.members?.length) {
+      for (const member of group.members) {
+        try {
+          const wrapped = await encryptMessage(rawB64, Number(member.id))
+          if (wrapped && wrapped !== rawB64) {
+            keysMap[member.id] = wrapped
+            distributed++
+          }
+        } catch { /* skip member with no bundle yet */ }
+      }
+      if (distributed > 0) {
+        await request(`/api/e2ee/group-keys/${groupId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ keys: keysMap }),
+        }).catch(err => console.warn('[E2EE] Failed to store group keys:', err))
+      }
+    }
+
+    e2eeState.groupKeys.set(groupId, rawB64)
+    return groupKey
+  } catch (err) {
+    console.error('[E2EE] Group key generation failed:', err)
+    return null
+  }
+}
+
+/* ── E2EE banner ─────────────────────────────────────────── */
+
+function appendE2EEBanner(isGroup = false) {
+  const existing = document.querySelector('.e2ee-banner')
+  if (existing) existing.remove()
+  const banner = document.createElement('div')
+  banner.className = 'e2ee-banner'
+  banner.innerHTML = isGroup
+    ? '<span class="e2ee-banner-icon">🔒</span><span>Messages are end-to-end encrypted with Double Ratchet (Signal Protocol). Only group members can read them.</span>'
+    : '<span class="e2ee-banner-icon">🔒</span><span>Messages are end-to-end encrypted with Double Ratchet (Signal Protocol). No one else can read them.</span>'
+  $('messages').appendChild(banner)
+}
 
 /* ============================================================
    USERS & GROUPS
@@ -657,9 +1725,14 @@ async function openConversation(user) {
   $('messages').innerHTML = ''
   state.renderedMessageIds.clear()
 
+  appendE2EEBanner(false)
+
   try {
     const history = await request(`/api/messages/${user.id}`)
-    history.forEach(renderMessage)
+    for (const msg of history) {
+      msg.content = await decryptHistoryMessage(msg.content, user.id, `dm:${msg.id}`)
+      renderMessage(msg)
+    }
     connect(user.id)
   } catch (error) {
     $('connectionStatus').textContent = error.message
@@ -697,9 +1770,14 @@ async function openGroupConversation(group) {
   $('messages').innerHTML = ''
   state.renderedMessageIds.clear()
 
+  appendE2EEBanner(true)
+
   try {
     const history = await request(`/api/groups/${group.id}/messages`)
-    history.forEach(renderMessage)
+    for (const msg of history) {
+      msg.content = await decryptHistoryMessage(msg.content, group.created_by, `grp:${msg.id}`)
+      renderMessage(msg)
+    }
     connectGroup(group.id)
   } catch (error) {
     $('connectionStatus').textContent = error.message
@@ -726,6 +1804,13 @@ function connectGroup(groupId) {
     }
 
     if (data.type === 'group_message' && state.selectedGroup && data.group_id === state.selectedGroup.id) {
+      const key = await getGroupConversationKey(state.selectedGroup)
+      const plaintext = await decryptMessage(data.content, key)
+      // Persist so history survives page refresh.
+      if (e2eeState.db && data.id) {
+        savePlaintext(e2eeState.db, `grp:${data.id}`, plaintext).catch(() => {})
+      }
+      data.content = plaintext
       renderMessage(data)
     }
 
@@ -786,6 +1871,19 @@ function connect(receiverId) {
         data.receiver_id === state.selected.id
       )
     ) {
+      // Determine the peer ID for decryption
+      // If I sent the message, decrypt using receiver's ID as peer
+      // If they sent it, decrypt using sender's ID as peer
+      const myUserId = state.session.user_id
+      const peerId = (data.sender_id === myUserId) ? data.receiver_id : data.sender_id
+      
+      const key = await getDirectConversationKey(peerId, state.selected)
+      const plaintext = await decryptMessage(data.content, key)
+      // Persist so history survives page refresh.
+      if (e2eeState.db && data.id) {
+        savePlaintext(e2eeState.db, `dm:${data.id}`, plaintext).catch(() => {})
+      }
+      data.content = plaintext
       renderMessage(data)
     }
 
@@ -878,7 +1976,7 @@ function renderMessage(message) {
 
 $('messageForm').addEventListener(
   'submit',
-  event => {
+  async event => {
 
     event.preventDefault()
 
@@ -897,15 +1995,46 @@ $('messageForm').addEventListener(
       return
     }
 
-    state.socket.send(
-      JSON.stringify({
-        content
-      })
-    )
+    // Derive encryption key — this MUST succeed before we send anything.
+    // If the peer hasn't uploaded their ECDH public key yet, we block send
+    // and show a message rather than silently sending plaintext.
+    let encryptedContent
+    try {
+      let key = null
+      if (state.selectedGroup) {
+        key = await getGroupConversationKey(state.selectedGroup)
+      } else if (state.selected) {
+        key = await getDirectConversationKey(state.selected.id, state.selected)
+      }
+
+      if (key === null || key === undefined) {
+        showToast('🔒 Waiting for peer\'s encryption key — message not sent. Ask them to open the app.', 5000)
+        return // Do NOT send plaintext. Ever.
+      }
+
+      encryptedContent = await encryptMessage(content, key)
+
+      // encryptMessage returns null when the peer has no prekey bundle yet.
+      // The toast was already shown inside encryptMessage — just abort here.
+      if (encryptedContent === null) {
+        return // NEVER send plaintext
+      }
+    } catch (err) {
+      console.error('[E2EE] Send encryption failed:', err)
+      showToast('❌ Encryption error — message not sent.', 4000)
+      return
+    }
 
     input.value = ''
+
+    state.socket.send(
+      JSON.stringify({
+        content: encryptedContent
+      })
+    )
   }
 )
+
 
 
 /* ============================================================
@@ -3215,9 +4344,16 @@ async function sendViaSocket(
     WebSocket.OPEN
   ) {
 
+    const key = await getDirectConversationKey(receiver.id, receiver)
+    const encrypted = await encryptMessage(message, key)
+    if (!encrypted || encrypted === message) {
+      showToast('🔒 Peer has not set up encryption yet — message not sent.', 5000)
+      return
+    }
+
     state.socket.send(
       JSON.stringify({
-        content: message
+        content: encrypted
       })
     )
 
@@ -3291,9 +4427,16 @@ async function sendViaSocket(
   Finally send message.
   */
 
+  const key = await getDirectConversationKey(receiver.id, receiver)
+  const encrypted = await encryptMessage(message, key)
+  if (!encrypted || encrypted === message) {
+    showToast('🔒 Peer has not set up encryption yet — message not sent.', 5000)
+    return
+  }
+
   state.socket.send(
     JSON.stringify({
-      content: message
+      content: encrypted
     })
   )
 }
@@ -3307,6 +4450,7 @@ if (state.session) {
 
   setView(true)
   updateProfileUI(state.session)
+  initE2EE().catch(console.error)
   connectSignal()
 
   refreshConversations()

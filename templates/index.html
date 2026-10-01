@@ -324,7 +324,10 @@
                                 <span class="status-pulse-dot" title="Online"></span>
                             </div>
                             <div class="conversation-meta">
-                                <h2 id="conversationName"></h2>
+                                <div style="display: flex; align-items: center; gap: 8px;">
+                                    <h2 id="conversationName"></h2>
+                                    <span class="e2ee-lock-badge" title="End-to-End Encrypted (AES-256-GCM)">🔒 E2EE</span>
+                                </div>
                                 <div class="connection-status-row">
                                     <span class="live-dot" id="connectionDot"></span>
                                     <p id="connectionStatus">Connecting...</p>

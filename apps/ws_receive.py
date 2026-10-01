@@ -24,11 +24,19 @@ from apps.models.schemas import (
     RegisterRequest,
     LoginRequest,
     CreateGroupRequest,
+    SetPublicKeyRequest,
+    SetGroupKeysRequest,
+    UploadPreKeyBundleRequest,
+    UploadOneTimePreKeysRequest,
+    PreKeyBundleResponse,
+    OPKCountResponse,
+    OneTimePreKeyItem,
 )
 import logging
 from apps.models.database import SessionLocal, lifespan
-from apps.models.model import Message, User, Group, GroupMember, GroupMessage
+from apps.models.model import Message, User, Group, GroupMember, GroupMessage, UserE2EE, GroupE2EEKey, OneTimePreKey
 from apps.ws_service import ConnectionManager
+from apps.services.call_event_handler import call_event_handler
 
 import asyncio
 import httpx
@@ -59,7 +67,23 @@ app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "templates", "
 JWT_SECRET = os.getenv("JWT_SECRET", "development-only-change-this-secret")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_MINUTES = 60
+
+# Fix Redis URL for local vs Docker
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+try:
+	import socket
+	# If we can resolve 'redis' hostname, we're in Docker
+	socket.gethostbyname('redis')
+	# In Docker: use redis hostname (keep as-is if already 'redis')
+	if "localhost" in REDIS_URL:
+		REDIS_URL = REDIS_URL.replace("localhost", "redis")
+except socket.gaierror:
+	# Running locally: use localhost and correct port (6380 for Docker, 6379 for local)
+	if "redis://" in REDIS_URL and "redis:6379" in REDIS_URL:
+		REDIS_URL = REDIS_URL.replace("redis:6379", "localhost:6380")
+	elif "redis://" in REDIS_URL and "://redis:" in REDIS_URL:
+		REDIS_URL = REDIS_URL.replace("://redis:", "://localhost:")
+
 redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
 
 # LiveKit SFU configuration
@@ -451,6 +475,238 @@ async def get_group_messages(
         ]
 
 
+@app.post("/api/e2ee/public-key")
+async def set_public_key(
+    body: SetPublicKeyRequest,
+    authorization: str | None = Header(default=None),
+):
+    user = await authenticated_user(authorization)
+    async with SessionLocal() as session:
+        e2ee = await session.get(UserE2EE, user.id)
+        if e2ee is None:
+            e2ee = UserE2EE(user_id=user.id, public_key=body.public_key)
+            session.add(e2ee)
+        else:
+            e2ee.public_key = body.public_key
+        await session.commit()
+    return {"status": "ok"}
+
+
+@app.get("/api/e2ee/public-key/{other_user_id}")
+async def get_public_key(
+    other_user_id: int,
+    authorization: str | None = Header(default=None),
+):
+    await authenticated_user(authorization)
+    async with SessionLocal() as session:
+        e2ee = await session.get(UserE2EE, other_user_id)
+        if e2ee is None:
+            return {"user_id": other_user_id, "public_key": None}
+        return {"user_id": other_user_id, "public_key": e2ee.public_key}
+
+
+@app.post("/api/e2ee/group-keys/{group_id}")
+async def set_group_keys(
+    group_id: int,
+    body: SetGroupKeysRequest,
+    authorization: str | None = Header(default=None),
+):
+    user = await authenticated_user(authorization)
+    async with SessionLocal() as session:
+        chk = await session.execute(
+            select(GroupMember).where(GroupMember.group_id == group_id, GroupMember.user_id == user.id)
+        )
+        if chk.scalar_one_or_none() is None:
+            raise HTTPException(403, "Not a member of this group")
+
+        for user_id_int, enc_key in body.keys.items():
+            existing = (await session.execute(
+                select(GroupE2EEKey).where(GroupE2EEKey.group_id == group_id, GroupE2EEKey.user_id == user_id_int)
+            )).scalar_one_or_none()
+            if existing:
+                existing.encrypted_key = enc_key
+            else:
+                session.add(GroupE2EEKey(group_id=group_id, user_id=user_id_int, encrypted_key=enc_key))
+        await session.commit()
+    return {"status": "ok"}
+
+
+@app.get("/api/e2ee/group-key/{group_id}")
+async def get_group_key(
+    group_id: int,
+    authorization: str | None = Header(default=None),
+):
+    user = await authenticated_user(authorization)
+    async with SessionLocal() as session:
+        k = (await session.execute(
+            select(GroupE2EEKey).where(GroupE2EEKey.group_id == group_id, GroupE2EEKey.user_id == user.id)
+        )).scalar_one_or_none()
+        if k is None:
+            return {"group_id": group_id, "encrypted_key": None}
+        return {"group_id": group_id, "encrypted_key": k.encrypted_key}
+
+
+@app.post("/api/e2ee/prekey-bundle")
+async def upload_prekey_bundle(
+    body: UploadPreKeyBundleRequest,
+    authorization: str | None = Header(default=None),
+):
+    user = await authenticated_user(authorization)
+    async with SessionLocal() as session:
+        e2ee = await session.get(UserE2EE, user.id)
+        if e2ee is None:
+            e2ee = UserE2EE(
+                user_id=user.id,
+                public_key=body.identity_key,
+                signed_prekey=body.signed_prekey,
+                signed_prekey_id=body.signed_prekey_id,
+                spk_signature=body.spk_signature,
+            )
+            session.add(e2ee)
+        else:
+            e2ee.public_key = body.identity_key
+            e2ee.signed_prekey = body.signed_prekey
+            e2ee.signed_prekey_id = body.signed_prekey_id
+            e2ee.spk_signature = body.spk_signature
+
+        if body.one_time_prekeys:
+            for opk in body.one_time_prekeys:
+                session.add(OneTimePreKey(
+                    user_id=user.id,
+                    key_id=opk.key_id,
+                    public_key=opk.public_key,
+                    used=False,
+                ))
+
+        await session.commit()
+
+        # Return remaining OPK count so the client knows if it needs to top up.
+        opk_count = (await session.execute(
+            select(func.count()).select_from(OneTimePreKey).where(
+                OneTimePreKey.user_id == user.id,
+                OneTimePreKey.used == False,  # noqa: E712
+            )
+        )).scalar_one()
+
+    return {"status": "ok", "opk_count": opk_count}
+
+
+@app.post("/api/e2ee/one-time-prekeys")
+async def upload_one_time_prekeys(
+    body: UploadOneTimePreKeysRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Top up one-time prekeys without touching the SPK/IK bundle."""
+    user = await authenticated_user(authorization)
+    async with SessionLocal() as session:
+        for opk in body.one_time_prekeys:
+            session.add(OneTimePreKey(
+                user_id=user.id,
+                key_id=opk.key_id,
+                public_key=opk.public_key,
+                used=False,
+            ))
+        await session.commit()
+
+        opk_count = (await session.execute(
+            select(func.count()).select_from(OneTimePreKey).where(
+                OneTimePreKey.user_id == user.id,
+                OneTimePreKey.used == False,  # noqa: E712
+            )
+        )).scalar_one()
+
+    return {"status": "ok", "opk_count": opk_count}
+
+
+@app.get("/api/e2ee/prekey-bundle/{target_user_id}")
+async def get_prekey_bundle(
+    target_user_id: int,
+    authorization: str | None = Header(default=None),
+):
+    """
+    Fetch the X3DH key bundle for *target_user_id* so the caller can initiate
+    a Double Ratchet session.
+
+    Returns { ready: false } with 200 (not 404) when the user hasn't uploaded
+    their bundle yet — this lets the client distinguish "not ready" from a real
+    server error and show a helpful toast instead of crashing.
+
+    One unused OPK is atomically claimed (marked used=True) and returned.
+    If no OPKs remain the field is None — X3DH still works with slightly reduced
+    forward secrecy for that session establishment.
+    """
+    await authenticated_user(authorization)
+    async with SessionLocal() as session:
+        e2ee = await session.get(UserE2EE, target_user_id)
+        if e2ee is None or e2ee.signed_prekey is None:
+            # Return 200 so the client doesn't mistake this for a server error.
+            return {
+                "ready": False,
+                "user_id": target_user_id,
+                "identity_key": None,
+                "signed_prekey": None,
+                "signed_prekey_id": None,
+                "spk_signature": None,
+                "one_time_prekey": None,
+                "opk_count": 0,
+            }
+
+        # Claim one OPK atomically: fetch the oldest unused one and mark it.
+        opk_row = (await session.execute(
+            select(OneTimePreKey)
+            .where(
+                OneTimePreKey.user_id == target_user_id,
+                OneTimePreKey.used == False,  # noqa: E712
+            )
+            .order_by(OneTimePreKey.id.asc())
+            .limit(1)
+            .with_for_update(skip_locked=True)
+        )).scalar_one_or_none()
+
+        claimed_opk: OneTimePreKeyItem | None = None
+        if opk_row is not None:
+            opk_row.used = True
+            claimed_opk = OneTimePreKeyItem(
+                key_id=opk_row.key_id,
+                public_key=opk_row.public_key,
+            )
+            await session.commit()
+
+        opk_count = (await session.execute(
+            select(func.count()).select_from(OneTimePreKey).where(
+                OneTimePreKey.user_id == target_user_id,
+                OneTimePreKey.used == False,  # noqa: E712
+            )
+        )).scalar_one()
+
+    return {
+        "ready": True,
+        "user_id": target_user_id,
+        "identity_key": e2ee.public_key,
+        "signed_prekey": e2ee.signed_prekey,
+        "signed_prekey_id": e2ee.signed_prekey_id,
+        "spk_signature": e2ee.spk_signature,
+        "one_time_prekey": claimed_opk,
+        "opk_count": opk_count,
+    }
+
+
+@app.get("/api/e2ee/opk-count", response_model=OPKCountResponse)
+async def get_opk_count(
+    authorization: str | None = Header(default=None),
+):
+    """Return how many unused OPKs remain for the authenticated user."""
+    user = await authenticated_user(authorization)
+    async with SessionLocal() as session:
+        count = (await session.execute(
+            select(func.count()).select_from(OneTimePreKey).where(
+                OneTimePreKey.user_id == user.id,
+                OneTimePreKey.used == False,  # noqa: E712
+            )
+        )).scalar_one()
+    return OPKCountResponse(user_id=user.id, opk_count=count)
+
+
 @app.websocket("/ws/group/{group_id}")
 async def group_websocket_endpoint(
     websocket: WebSocket,
@@ -479,10 +735,10 @@ async def group_websocket_endpoint(
                 continue
 
             content = MessageCreate.model_validate(payload).content.strip()
-            if not content or len(content) > 2000:
+            if not content or len(content) > 10000:
                 await websocket.send_json({
                     "type": "error",
-                    "message": "Message must be 1 to 2000 characters.",
+                    "message": "Message must be 1 to 10000 characters.",
                 })
                 continue
 
@@ -521,6 +777,7 @@ async def chat_page():
 
 async def relay_call_signal(payload: dict, sender_id: int, default_target_id: int | None) -> bool:
     signal_type = payload.get("type")
+    logger.info(f"[SIGNAL] Received signal_type: {signal_type} from sender_id: {sender_id}, payload keys: {list(payload.keys())}")
     if signal_type not in CALL_SIGNAL_TYPES:
         return False
 
@@ -543,6 +800,24 @@ async def relay_call_signal(payload: dict, sender_id: int, default_target_id: in
             "participant_names": payload.get("participant_names", []),
             "group_name": payload.get("group_name", ""),
         }
+        
+        # Publish call invite event to Kafka
+        call_id = payload.get("call_id", str(uuid.uuid4()))
+        try:
+            await call_event_handler.handle_call_offer(
+                call_id=call_id,
+                caller_id=sender_id,
+                receiver_id=target_ids[0] if target_ids else 0,
+                participants=target_ids,
+                metadata={
+                    "room_name": payload.get("room_name", ""),
+                    "group_name": payload.get("group_name", ""),
+                    "participant_names": payload.get("participant_names", []),
+                }
+            )
+        except Exception as e:
+            logger.error(f"Failed to publish call_invite event: {e}")
+        
         for tid in target_ids:
             try:
                 tid = int(tid)
@@ -565,6 +840,20 @@ async def relay_call_signal(payload: dict, sender_id: int, default_target_id: in
             "sender_username": payload.get("sender_username"),
             "room_name": payload.get("room_name", ""),
         }
+        
+        # Publish call ended event to Kafka
+        call_id = payload.get("call_id", str(uuid.uuid4()))
+        try:
+            await call_event_handler.handle_call_ended(
+                call_id=call_id,
+                caller_id=sender_id,
+                participants=[sender_id, target_id],
+                reason="user_left",
+                metadata={"room_name": payload.get("room_name", "")}
+            )
+        except Exception as e:
+            logger.error(f"Failed to publish call_leave event: {e}")
+        
         if target_id != sender_id:
             await manager.send_message(target_id, event)
         return True
@@ -578,6 +867,55 @@ async def relay_call_signal(payload: dict, sender_id: int, default_target_id: in
 
     if target_id == sender_id:
         return True
+
+    call_id = payload.get("call_id", str(uuid.uuid4()))
+    
+    # Publish appropriate event to Kafka based on signal type
+    try:
+        if signal_type == "call_offer":
+            logger.info(f"[KAFKA] Publishing call_offer event - call_id: {call_id}")
+            await call_event_handler.handle_call_offer(
+                call_id=call_id,
+                caller_id=sender_id,
+                receiver_id=target_id,
+                participants=[sender_id, target_id],
+                metadata={"sdp": payload.get("sdp")}
+            )
+        elif signal_type == "call_answer":
+            logger.info(f"[KAFKA] Publishing call_answer event - call_id: {call_id}")
+            await call_event_handler.handle_call_answer(
+                call_id=call_id,
+                answerer_id=sender_id,
+                caller_id=payload.get("caller_id", sender_id),
+                participants=[sender_id, target_id],
+                metadata={"sdp": payload.get("sdp")}
+            )
+        elif signal_type == "call_reject":
+            logger.info(f"[KAFKA] Publishing call_reject event - call_id: {call_id}")
+            await call_event_handler.handle_call_rejected(
+                call_id=call_id,
+                rejector_id=sender_id,
+                caller_id=payload.get("caller_id", sender_id),
+                reason=payload.get("reason", "user_declined")
+            )
+        elif signal_type == "call_end":
+            logger.info(f"[KAFKA] Publishing call_end event - call_id: {call_id}")
+            await call_event_handler.handle_call_ended(
+                call_id=call_id,
+                caller_id=payload.get("caller_id", sender_id),
+                participants=[sender_id, target_id],
+                duration_seconds=payload.get("duration_seconds", 0),
+                reason=payload.get("reason", "normal_end")
+            )
+        elif signal_type == "call_ice":
+            logger.info(f"[KAFKA] Publishing call_ice event - call_id: {call_id}")
+            await call_event_handler.handle_ice_candidate(
+                call_id=call_id,
+                sender_id=sender_id,
+                candidate=payload.get("candidate", {})
+            )
+    except Exception as e:
+        logger.error(f"Failed to publish {signal_type} event: {e}", exc_info=True)
 
     event = {
         "type": signal_type,
@@ -681,10 +1019,10 @@ async def websocket_endpoint(
                 if await relay_call_signal(payload, sender.id, receiver.id):
                     continue
                 content = MessageCreate.model_validate(payload).content.strip()
-                if not content or len(content) > 2000:
+                if not content or len(content) > 10000:
                     await websocket.send_json({
                         "type": "error",
-                        "message": "Message must be 1 to 2000 characters.",
+                        "message": "Message must be 1 to 10000 characters.",
                     })
                     continue
 
@@ -1299,13 +1637,6 @@ async def call_summary_group(
     caller_email: str = "",
     receiver_email: str = "",
 ):
-    """Summarise a group video call.
-
-    ``member_emails`` should be a JSON‑encoded list of email addresses.
-    ``member_names`` is a comma‑separated list of display names.
-    The payload is extended with ``group_name`` and the members' details before
-    being sent to the existing n8n workflow.
-    """
     # Re‑use the existing 1‑on‑1 logic with additional group data
     user = await authenticated_user(authorization)
 
