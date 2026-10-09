@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y \
 RUN pip install --no-cache-dir uv
 
 # Copy dependency and source package metadata first so uv can resolve the project
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml README.md uv.lock ./
 COPY src ./src
 
 # Install dependencies from uv.lock
