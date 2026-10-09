@@ -1,0 +1,33 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+.envrc
+
+# Version control and editor files
+.git
+.vscode
+.idea
+
+# Python environments and generated files
+.venv
+venv
+ENV
+__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage*
+htmlcov
+
+# Local frontend dependencies and generated assets
+node_modules
+
+# Tests and local-only examples/docs
+test_*.py
+example_kafka_usage.py
+QUICKSTART.md
+SETUP_KAFKA.md
+TESTING_SUMMARY.txt
+TEST_KAFKA.md
