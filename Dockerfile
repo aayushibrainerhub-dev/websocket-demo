@@ -11,8 +11,9 @@ RUN apt-get update && apt-get install -y \
 # Install uv
 RUN pip install --no-cache-dir uv
 
-# Copy dependency files first
+# Copy dependency and source package metadata first so uv can resolve the project
 COPY pyproject.toml uv.lock ./
+COPY src ./src
 
 # Install dependencies from uv.lock
 RUN uv sync --frozen --no-dev --no-install-project
