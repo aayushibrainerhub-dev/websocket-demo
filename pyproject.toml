@@ -28,7 +28,6 @@ dependencies = [
     "ngrok>=1.4.0",
     "redis>=8.1.0",
     "livekit-api>=1.2.1",
-    "aiokafka>=0.14.0",
 ]
 
 [project.scripts]

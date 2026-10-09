@@ -36,7 +36,6 @@ import logging
 from apps.models.database import SessionLocal, lifespan
 from apps.models.model import Message, User, Group, GroupMember, GroupMessage, UserE2EE, GroupE2EEKey, OneTimePreKey
 from apps.ws_service import ConnectionManager
-from apps.services.call_event_handler import call_event_handler
 
 import asyncio
 import httpx
@@ -801,23 +800,6 @@ async def relay_call_signal(payload: dict, sender_id: int, default_target_id: in
             "group_name": payload.get("group_name", ""),
         }
         
-        # Publish call invite event to Kafka
-        call_id = payload.get("call_id", str(uuid.uuid4()))
-        try:
-            await call_event_handler.handle_call_offer(
-                call_id=call_id,
-                caller_id=sender_id,
-                receiver_id=target_ids[0] if target_ids else 0,
-                participants=target_ids,
-                metadata={
-                    "room_name": payload.get("room_name", ""),
-                    "group_name": payload.get("group_name", ""),
-                    "participant_names": payload.get("participant_names", []),
-                }
-            )
-        except Exception as e:
-            logger.error(f"Failed to publish call_invite event: {e}")
-        
         for tid in target_ids:
             try:
                 tid = int(tid)
@@ -841,19 +823,6 @@ async def relay_call_signal(payload: dict, sender_id: int, default_target_id: in
             "room_name": payload.get("room_name", ""),
         }
         
-        # Publish call ended event to Kafka
-        call_id = payload.get("call_id", str(uuid.uuid4()))
-        try:
-            await call_event_handler.handle_call_ended(
-                call_id=call_id,
-                caller_id=sender_id,
-                participants=[sender_id, target_id],
-                reason="user_left",
-                metadata={"room_name": payload.get("room_name", "")}
-            )
-        except Exception as e:
-            logger.error(f"Failed to publish call_leave event: {e}")
-        
         if target_id != sender_id:
             await manager.send_message(target_id, event)
         return True
@@ -867,55 +836,6 @@ async def relay_call_signal(payload: dict, sender_id: int, default_target_id: in
 
     if target_id == sender_id:
         return True
-
-    call_id = payload.get("call_id", str(uuid.uuid4()))
-    
-    # Publish appropriate event to Kafka based on signal type
-    try:
-        if signal_type == "call_offer":
-            logger.info(f"[KAFKA] Publishing call_offer event - call_id: {call_id}")
-            await call_event_handler.handle_call_offer(
-                call_id=call_id,
-                caller_id=sender_id,
-                receiver_id=target_id,
-                participants=[sender_id, target_id],
-                metadata={"sdp": payload.get("sdp")}
-            )
-        elif signal_type == "call_answer":
-            logger.info(f"[KAFKA] Publishing call_answer event - call_id: {call_id}")
-            await call_event_handler.handle_call_answer(
-                call_id=call_id,
-                answerer_id=sender_id,
-                caller_id=payload.get("caller_id", sender_id),
-                participants=[sender_id, target_id],
-                metadata={"sdp": payload.get("sdp")}
-            )
-        elif signal_type == "call_reject":
-            logger.info(f"[KAFKA] Publishing call_reject event - call_id: {call_id}")
-            await call_event_handler.handle_call_rejected(
-                call_id=call_id,
-                rejector_id=sender_id,
-                caller_id=payload.get("caller_id", sender_id),
-                reason=payload.get("reason", "user_declined")
-            )
-        elif signal_type == "call_end":
-            logger.info(f"[KAFKA] Publishing call_end event - call_id: {call_id}")
-            await call_event_handler.handle_call_ended(
-                call_id=call_id,
-                caller_id=payload.get("caller_id", sender_id),
-                participants=[sender_id, target_id],
-                duration_seconds=payload.get("duration_seconds", 0),
-                reason=payload.get("reason", "normal_end")
-            )
-        elif signal_type == "call_ice":
-            logger.info(f"[KAFKA] Publishing call_ice event - call_id: {call_id}")
-            await call_event_handler.handle_ice_candidate(
-                call_id=call_id,
-                sender_id=sender_id,
-                candidate=payload.get("candidate", {})
-            )
-    except Exception as e:
-        logger.error(f"Failed to publish {signal_type} event: {e}", exc_info=True)
 
     event = {
         "type": signal_type,
