@@ -600,7 +600,13 @@ async function decryptHistoryMessage(content, keyOrPeerId, idbPrefix) {
   // 1. IDB plaintext cache — primary source, always works after first view.
   if (db) {
     const cached = await getPlaintext(db, idbPrefix)
-    if (cached !== null && cached !== undefined) return cached
+      if (cached !== null && cached !== undefined) {
+        if (typeof cached === 'string' && cached.startsWith('🔒 [Encrypted message]')) {
+          await idbDelete(db, 'plaintexts', idbPrefix).catch(() => {})
+        } else {
+          return cached
+        }
+      }
   }
 
   // 2. sentCache — in-memory, works for messages sent this session before refresh.
@@ -1051,7 +1057,7 @@ async function x3dhInitiateSession(identity, bundle) {
     PN:          0,
     DHs_pub:     await crypto.subtle.exportKey('jwk', DHs.publicKey),
     DHs_priv:    DHs.privateKey,   // CryptoKey (non-extractable), stored in IDB directly
-    DHr_pub:     identity.spk_pub,   // Bob's SPK used as initial remote ratchet key
+    DHr_pub:     spkPubJwk,          // Bob's SPK used as initial remote ratchet key
     isInitiator: true,
   })
 
@@ -1482,6 +1488,9 @@ async function decryptMessageNow(content, peerIdOrKey) {
         } catch (recoveryError) {
           console.warn('[E2EE] X3DH recovery failed:', recoveryError)
         }
+        await idbDelete(db, 'sessions', peerId).catch(() => {})
+        e2eeState.sessionCache.delete(peerId)
+        showToast('🔒 This conversation needs a fresh encryption session. Send a new message to re-establish it.', 6000)
       }
       return '🔒 [Encrypted message]'
     }
