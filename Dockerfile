@@ -41,8 +41,8 @@ COPY package.json package-lock.json ./
 # Verify the Node.js and npm versions
 RUN node --version && npm --version
 
-# Install frontend dependencies and bundle JavaScript
-RUN npm ci && npm run build
+# Install frontend dependencies from the lockfile
+RUN npm ci
 
 # Create non-root user
 RUN useradd -m -u 1000 appuser && \
