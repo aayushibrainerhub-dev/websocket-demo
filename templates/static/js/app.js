@@ -21,10 +21,18 @@ function isCryptoKey(value) {
   return typeof CryptoKey !== 'undefined' && value instanceof CryptoKey
 }
 
+function isSecureContext() {
+  if (typeof window === 'undefined') return false
+  return window.isSecureContext || location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1'
+}
+
 function ensureWebCrypto() {
   const cryptoApi = getWebCrypto()
   if (!cryptoApi) {
     throw new Error('Web Crypto API is not available in this browser/context.')
+  }
+  if (!isSecureContext()) {
+    throw new Error('E2EE requires a secure browser context (HTTPS or localhost).')
   }
   return cryptoApi
 }
@@ -941,6 +949,10 @@ async function initE2EE() {
 
   const userId = state.session.user_id
   try {
+    if (!isSecureContext()) {
+      throw new Error('E2EE requires HTTPS or localhost.')
+    }
+
     const db = await openIDB(userId)
     e2eeState.db = db
 
