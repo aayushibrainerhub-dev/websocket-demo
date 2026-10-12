@@ -2,20 +2,22 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies and Node.js/npm
 RUN apt-get update && apt-get install -y \
     gcc \
     postgresql-client \
+    nodejs \
+    npm \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv
 RUN pip install --no-cache-dir uv
 
-# Copy dependency and source package metadata first so uv can resolve the project
+# Copy Python dependency and source metadata
 COPY pyproject.toml README.md uv.lock ./
 COPY src ./src
 
-# Install dependencies from uv.lock
+# Install Python dependencies
 RUN uv sync --frozen --no-dev --no-install-project
 
 # Copy application files
@@ -25,6 +27,12 @@ COPY alembic.ini ./
 COPY main.py ./
 COPY templates ./templates
 COPY voices ./voices
+
+# Copy frontend package files
+COPY package.json package-lock.json ./
+
+# Install frontend dependencies and build JavaScript
+RUN npm ci && npm run build
 
 # Create non-root user
 RUN useradd -m -u 1000 appuser && \

@@ -950,7 +950,9 @@ async function initE2EE() {
   const userId = state.session.user_id
   try {
     if (!isSecureContext()) {
-      throw new Error('E2EE requires HTTPS or localhost.')
+      console.warn('[E2EE] Secure context required; disabling E2EE for this page.')
+      showToast('🔒 Secure HTTPS connection is required for encrypted chat. Please use HTTPS to enable E2EE.', 5000)
+      return
     }
 
     const db = await openIDB(userId)
@@ -2009,6 +2011,39 @@ function renderMessage(message) {
   })
 }
 
+
+function insertAtCursor(input, text) {
+  if (!input) return
+  const start = input.selectionStart ?? input.value.length
+  const end = input.selectionEnd ?? input.value.length
+  const nextValue = input.value.slice(0, start) + text + input.value.slice(end)
+  input.value = nextValue
+  const caret = start + text.length
+  input.focus()
+  input.setSelectionRange(caret, caret)
+  input.dispatchEvent(new Event('input', { bubbles: true }))
+}
+
+const emojiToggleBtn = $('emojiToggleBtn')
+const emojiPickerPanel = $('emojiPickerPanel')
+const messageInput = $('messageInput')
+const emojiPicker = document.querySelector('emoji-picker')
+
+if (emojiToggleBtn && emojiPickerPanel) {
+  emojiToggleBtn.addEventListener('click', () => {
+    const isHidden = emojiPickerPanel.classList.toggle('hidden')
+    if (!isHidden && messageInput) messageInput.focus()
+  })
+}
+
+if (emojiPicker) {
+  emojiPicker.addEventListener('emoji-click', event => {
+    const emoji = event.detail?.unicode || event.detail?.emoji || event.detail?.emoji?.unicode
+    if (!emoji) return
+    insertAtCursor(messageInput, emoji)
+    if (emojiPickerPanel) emojiPickerPanel.classList.add('hidden')
+  })
+}
 
 $('messageForm').addEventListener(
   'submit',
