@@ -1263,7 +1263,7 @@ async function encryptMessage(text, peerIdOrKey) {
       return JSON.stringify({ e2ee: true, v: 1, iv: buf2b64(iv), data: buf2b64(ct) })
     } catch (err) {
       console.error('[E2EE] Group encrypt failed:', err)
-      return text
+      return null
     }
   }
 
@@ -1301,7 +1301,7 @@ async function encryptMessage(text, peerIdOrKey) {
     return ciphertext
   } catch (err) {
     console.error('[E2EE] DR encrypt failed:', err)
-    return text
+    return null
   }
 }
 
@@ -2014,14 +2014,14 @@ $('messageForm').addEventListener(
 
       encryptedContent = await encryptMessage(content, key)
 
-      // encryptMessage returns null when the peer has no prekey bundle yet.
-      // The toast was already shown inside encryptMessage — just abort here.
-      if (encryptedContent === null) {
+      // encryptMessage returns null when the peer has no prekey bundle or crypto
+      // setup is not ready yet. Block the send instead of falling back to plaintext.
+      if (encryptedContent === null || encryptedContent === undefined) {
         return // NEVER send plaintext
       }
     } catch (err) {
       console.error('[E2EE] Send encryption failed:', err)
-      showToast('❌ Encryption error — message not sent.', 4000)
+      showToast('🔒 Encryption is not ready for this conversation yet — message not sent.', 5000)
       return
     }
 
@@ -4346,7 +4346,7 @@ async function sendViaSocket(
 
     const key = await getDirectConversationKey(receiver.id, receiver)
     const encrypted = await encryptMessage(message, key)
-    if (!encrypted || encrypted === message) {
+    if (encrypted === null || encrypted === undefined || encrypted === message) {
       showToast('🔒 Peer has not set up encryption yet — message not sent.', 5000)
       return
     }
@@ -4429,7 +4429,7 @@ async function sendViaSocket(
 
   const key = await getDirectConversationKey(receiver.id, receiver)
   const encrypted = await encryptMessage(message, key)
-  if (!encrypted || encrypted === message) {
+  if (encrypted === null || encrypted === undefined || encrypted === message) {
     showToast('🔒 Peer has not set up encryption yet — message not sent.', 5000)
     return
   }

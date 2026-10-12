@@ -4,6 +4,8 @@ services:
   postgres:
     image: postgres:15-alpine
     restart: unless-stopped
+    ports:
+      - "5433:5432"
     networks:
       - websocket-network
     environment:
