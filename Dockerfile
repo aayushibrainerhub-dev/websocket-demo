@@ -2,22 +2,29 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies and Node.js/npm
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
     gcc \
     postgresql-client \
-    nodejs \
-    npm \
+    curl \
+    ca-certificates \
+    gnupg \
+    && install -d /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+       | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+       > /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update \
+    && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv
 RUN pip install --no-cache-dir uv
 
-# Copy Python dependency and source metadata
+# Copy Python dependency metadata
 COPY pyproject.toml README.md uv.lock ./
 COPY src ./src
 
-# Install Python dependencies
 RUN uv sync --frozen --no-dev --no-install-project
 
 # Copy application files
@@ -28,10 +35,13 @@ COPY main.py ./
 COPY templates ./templates
 COPY voices ./voices
 
-# Copy frontend package files
+# Copy frontend package metadata
 COPY package.json package-lock.json ./
 
-# Install frontend dependencies and build JavaScript
+# Verify the Node.js and npm versions
+RUN node --version && npm --version
+
+# Install frontend dependencies and bundle JavaScript
 RUN npm ci && npm run build
 
 # Create non-root user
