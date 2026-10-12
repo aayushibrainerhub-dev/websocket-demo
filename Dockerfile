@@ -44,6 +44,11 @@ RUN node --version && npm --version
 # Install frontend dependencies from the lockfile
 RUN npm ci
 
+# Serve frontend packages locally instead of relying on external CDNs
+RUN mkdir -p templates/static/vendor/emoji-picker-element && \
+    cp -R node_modules/emoji-picker-element/. templates/static/vendor/emoji-picker-element/ && \
+    cp node_modules/livekit-client/dist/livekit-client.umd.js templates/static/js/livekit-client.umd.js
+
 # Create non-root user
 RUN useradd -m -u 1000 appuser && \
     chown -R appuser:appuser /app
