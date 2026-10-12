@@ -12,6 +12,22 @@ const state = {
 
 const $ = id => document.getElementById(id)
 
+function getWebCrypto() {
+  const candidate = (typeof window !== 'undefined' && window.crypto) || (typeof globalThis !== 'undefined' && globalThis.crypto)
+  return candidate && candidate.subtle ? candidate : null
+}
+
+function isCryptoKey(value) {
+  return typeof CryptoKey !== 'undefined' && value instanceof CryptoKey
+}
+
+function ensureWebCrypto() {
+  const cryptoApi = getWebCrypto()
+  if (!cryptoApi) {
+    throw new Error('Web Crypto API is not available in this browser/context.')
+  }
+  return cryptoApi
+}
 
 function initials(name) {
   if (!name) return ''
@@ -617,15 +633,16 @@ async function hkdf(ikm, length, info, salt = null) {
 // Public key: extractable=true  (needs to be exported to JWK for the wire).
 // Private key: extractable=false (stored as a CryptoKey in IndexedDB, never exported).
 async function generateECDHPair() {
+  const cryptoApi = ensureWebCrypto()
   // Generate extractable first so we can export the public half to JWK.
-  const extractable = await crypto.subtle.generateKey(
+  const extractable = await cryptoApi.subtle.generateKey(
     { name: 'ECDH', namedCurve: 'P-256' },
     true,
     ['deriveKey', 'deriveBits']
   )
   // Re-import private key as non-extractable — it will live only in IDB/memory.
-  const privJwk = await crypto.subtle.exportKey('jwk', extractable.privateKey)
-  const nonExtractablePriv = await crypto.subtle.importKey(
+  const privJwk = await cryptoApi.subtle.exportKey('jwk', extractable.privateKey)
+  const nonExtractablePriv = await cryptoApi.subtle.importKey(
     'jwk', privJwk,
     { name: 'ECDH', namedCurve: 'P-256' },
     false,                      // ← non-extractable
@@ -648,9 +665,10 @@ async function importECDHPub(jwk) {
 }
 
 async function importECDHPriv(jwkOrKey) {
+  const cryptoApi = ensureWebCrypto()
   // Accept either a JWK object (from wire/old storage) or a CryptoKey directly (from IDB).
-  if (jwkOrKey instanceof CryptoKey) return jwkOrKey
-  return crypto.subtle.importKey(
+  if (isCryptoKey(jwkOrKey)) return jwkOrKey
+  return cryptoApi.subtle.importKey(
     'jwk', jwkOrKey,
     { name: 'ECDH', namedCurve: 'P-256' },
     false,                      // ← non-extractable
@@ -930,7 +948,7 @@ async function initE2EE() {
 
     // Migration: regenerate if identity is missing sig keys OR if private keys
     // are still stored as JWK strings (pre non-extractable upgrade).
-    const privKeysAreJWK = identity.ik_priv && !(identity.ik_priv instanceof CryptoKey)
+    const privKeysAreJWK = identity.ik_priv && !isCryptoKey(identity.ik_priv)
     if (!identity.sig_pub || !identity.sig_priv || privKeysAreJWK) {
       console.info('[E2EE] Identity needs regeneration (missing sig keys or old JWK format).')
       await idbDelete(db, 'identity', 'keys')
@@ -1251,8 +1269,14 @@ async function encryptMessage(text, peerIdOrKey) {
   // peerIdOrKey is a numeric peer ID for DR, or an AES CryptoKey for groups (legacy API).
   if (!text) return text
 
+  const cryptoApi = getWebCrypto()
+  if (!cryptoApi) {
+    console.warn('[E2EE] Web Crypto unavailable; message not sent.')
+    return null
+  }
+
   // Group key path (CryptoKey object passed in).
-  if (peerIdOrKey instanceof CryptoKey) {
+  if (isCryptoKey(peerIdOrKey)) {
     try {
       const iv = crypto.getRandomValues(new Uint8Array(12))
       const ct = await crypto.subtle.encrypt(
@@ -1331,7 +1355,7 @@ async function decryptMessage(content, peerIdOrKey) {
 
   // ── v1 (legacy AES-GCM, group messages or old direct) ──
   if (parsed.v === 1) {
-    if (!(peerIdOrKey instanceof CryptoKey)) {
+    if (!isCryptoKey(peerIdOrKey)) {
       // Attempt to get a group CryptoKey from the cache if none passed.
       return '🔒 [Encrypted – legacy format]'
     }
@@ -1349,7 +1373,7 @@ async function decryptMessage(content, peerIdOrKey) {
 
   // ── v2 Double Ratchet ──
   if (parsed.v === 2) {
-    const peerId = Number(peerIdOrKey instanceof CryptoKey ? 0 : peerIdOrKey)
+    const peerId = Number(isCryptoKey(peerIdOrKey) ? 0 : peerIdOrKey)
     if (!peerId) return '🔒 [Encrypted – no peer id]'
     if (!e2eeState.initialized) await initE2EE()
 
