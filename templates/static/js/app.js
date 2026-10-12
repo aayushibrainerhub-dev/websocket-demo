@@ -369,6 +369,7 @@ function performLogout() {
   resetVoiceState()
 
   e2eeState.sessionCache.clear()
+  e2eeState.peerQueues.clear()
   e2eeState.groupKeys.clear()
   e2eeState.conversationKeys.clear()
   e2eeState.sentCache.clear()
@@ -825,6 +826,7 @@ const e2eeState = {
   initialized: false,
   // In-memory caches to avoid redundant IDB reads in the same page session
   sessionCache: new Map(),         // peerId → DoubleRatchetSession
+  peerQueues: new Map(),           // peerId → serialised send/decrypt operations
   groupKeys: new Map(),            // groupId → raw AES key bytes (b64)
   // Legacy v1 in-memory map (kept for group-key wrapping compatibility)
   conversationKeys: new Map(),
@@ -1182,8 +1184,9 @@ async function drDecrypt(db, identity, peerId, session, envelope) {
   if (rkPubStr) {
     const skipped = await getSkippedKey(db, peerId, rkPubStr, n)
     if (skipped) {
+      const plaintext = await aesDecrypt(skipped, iv, ct)
       await deleteSkippedKey(db, peerId, rkPubStr, n)
-      return aesDecrypt(skipped, iv, ct)
+      return plaintext
     }
   }
 
@@ -1226,7 +1229,6 @@ async function drDecrypt(db, identity, peerId, session, envelope) {
   session.CKr = newCK
   session.Nr  = n + 1
 
-  await saveSession(db, peerId, session)
   return aesDecrypt(mk, iv, ct)
 }
 
@@ -1279,7 +1281,28 @@ async function getDRSession(peerId) {
 
 /* ── Public: encryptMessage ──────────────────────────────── */
 
+function serializePeerCrypto(peerId, operation) {
+  const key = Number(peerId)
+  const previous = e2eeState.peerQueues.get(key) || Promise.resolve()
+  const current = previous.then(operation, operation)
+  const tail = current.then(() => undefined, () => undefined)
+  e2eeState.peerQueues.set(key, tail)
+  tail.then(() => {
+    if (e2eeState.peerQueues.get(key) === tail) e2eeState.peerQueues.delete(key)
+  })
+  return current
+}
+
 async function encryptMessage(text, peerIdOrKey) {
+  if (isCryptoKey(peerIdOrKey)) return encryptMessageNow(text, peerIdOrKey)
+  const peerId = Number(peerIdOrKey)
+  if (!Number.isSafeInteger(peerId) || peerId <= 0) {
+    return encryptMessageNow(text, peerIdOrKey)
+  }
+  return serializePeerCrypto(peerId, () => encryptMessageNow(text, peerId))
+}
+
+async function encryptMessageNow(text, peerIdOrKey) {
   // peerIdOrKey is a numeric peer ID for DR, or an AES CryptoKey for groups (legacy API).
   if (!text) return text
 
@@ -1352,6 +1375,21 @@ function isEncryptedMessage(str) {
 }
 
 async function decryptMessage(content, peerIdOrKey) {
+  if (!isEncryptedMessage(content) || isCryptoKey(peerIdOrKey)) {
+    return decryptMessageNow(content, peerIdOrKey)
+  }
+  let parsed
+  try { parsed = JSON.parse(content) } catch {
+    return decryptMessageNow(content, peerIdOrKey)
+  }
+  const peerId = Number(peerIdOrKey)
+  if (parsed.v !== 2 || !Number.isSafeInteger(peerId) || peerId <= 0) {
+    return decryptMessageNow(content, peerIdOrKey)
+  }
+  return serializePeerCrypto(peerId, () => decryptMessageNow(content, peerId))
+}
+
+async function decryptMessageNow(content, peerIdOrKey) {
   if (!isEncryptedMessage(content)) return content   // legacy plain text
 
   // Check sent-cache first: if we encrypted this exact ciphertext ourselves,
@@ -1404,8 +1442,6 @@ async function decryptMessage(content, peerIdOrKey) {
           parsed.opk_id ?? null,
           parsed.spk_id ?? e2eeState.identity.spk_id
         )
-        await saveSession(db, peerId, session)
-        e2eeState.sessionCache.set(peerId, session)
       } catch (err) {
         console.warn('[E2EE] X3DH respond failed:', err)
         return '🔒 [Session init failed]'
@@ -1415,12 +1451,38 @@ async function decryptMessage(content, peerIdOrKey) {
     if (!session) return '🔒 [No session – key pending]'
 
     try {
-      const plaintext = await drDecrypt(db, e2eeState.identity, peerId, session, parsed)
-      // Keep the in-memory cache up to date.
-      e2eeState.sessionCache.set(peerId, session)
+      // Work on a copy so failed authentication cannot advance persisted ratchet state.
+      const workingSession = new DoubleRatchetSession(session)
+      const plaintext = await drDecrypt(db, e2eeState.identity, peerId, workingSession, parsed)
+      await saveSession(db, peerId, workingSession)
+      e2eeState.sessionCache.set(peerId, workingSession)
       return plaintext
     } catch (err) {
       console.warn('[E2EE] DR decrypt failed:', err)
+      if (parsed.ek && parsed.ik) {
+        try {
+          const resetSession = await x3dhRespondSession(
+            e2eeState.identity,
+            parsed.ik,
+            parsed.ek,
+            parsed.opk_id ?? null,
+            parsed.spk_id ?? e2eeState.identity.spk_id
+          )
+          const plaintext = await drDecrypt(
+            db,
+            e2eeState.identity,
+            peerId,
+            resetSession,
+            parsed
+          )
+          await saveSession(db, peerId, resetSession)
+          e2eeState.sessionCache.set(peerId, resetSession)
+          console.info('[E2EE] Recovered stale session from X3DH init message.')
+          return plaintext
+        } catch (recoveryError) {
+          console.warn('[E2EE] X3DH recovery failed:', recoveryError)
+        }
+      }
       return '🔒 [Encrypted message]'
     }
   }
@@ -1845,7 +1907,7 @@ function connectGroup(groupId) {
       const key = await getGroupConversationKey(state.selectedGroup)
       const plaintext = await decryptMessage(data.content, key)
       // Persist so history survives page refresh.
-      if (e2eeState.db && data.id) {
+      if (e2eeState.db && data.id && !plaintext.startsWith('🔒')) {
         savePlaintext(e2eeState.db, `grp:${data.id}`, plaintext).catch(() => {})
       }
       data.content = plaintext
@@ -1918,7 +1980,7 @@ function connect(receiverId) {
       const key = await getDirectConversationKey(peerId, state.selected)
       const plaintext = await decryptMessage(data.content, key)
       // Persist so history survives page refresh.
-      if (e2eeState.db && data.id) {
+      if (e2eeState.db && data.id && !plaintext.startsWith('🔒')) {
         savePlaintext(e2eeState.db, `dm:${data.id}`, plaintext).catch(() => {})
       }
       data.content = plaintext
