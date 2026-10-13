@@ -5,7 +5,7 @@ import wave
 import struct
 import tempfile
 import os
-
+import pytest
 def create_dummy_wav(filename):
     """Creates a 1-second silent WAV file."""
     with wave.open(filename, 'w') as f:
@@ -15,6 +15,7 @@ def create_dummy_wav(filename):
         for _ in range(16000):
             f.writeframesraw(struct.pack('<h', 0))
 
+@pytest.mark.asyncio
 async def test_group_summary_endpoint():
     print("Creating dummy audio files...")
     local_wav = "dummy_local.wav"
