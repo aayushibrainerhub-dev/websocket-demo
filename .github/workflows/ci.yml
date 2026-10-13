@@ -82,8 +82,8 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          script_stop: true
+          port: 22
           script: |
-            cd "${{ secrets.EC2_APP_DIR }}"
-            git pull --ff-only origin "${{ github.ref_name }}"
+            cd ~/websocket-demo
+            git pull origin main
             docker compose up -d --build
