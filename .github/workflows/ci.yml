@@ -35,15 +35,53 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
-      # 5. Run automated tests
+      # 5. Start the test database
+      - name: Start PostgreSQL
+        env:
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: |
+          touch .env
+          docker compose -p ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT} -f docker-compose.yml up -d --wait postgres
+
+      # 6. Run automated tests
       - name: Run tests
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: uv run pytest -v
 
-      # 6. Validate Python syntax
+      # 7. Stop the test database
+      - name: Stop PostgreSQL
+        if: always()
+        run: |
+          docker compose -p ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT} -f docker-compose.yml down -v
+          rm -f .env
+
+      # 8. Validate Python syntax
       - name: Validate Python syntax
         run: |
           uv run python -m compileall -q apps main.py
 
-      # 7. Validate Docker image build
+      # 9. Validate Docker image build
       - name: Build Docker image
         run: docker build -t websocket-demo:ci .
+
+  deploy:
+    name: Deploy to AWS EC2
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push'
+
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script_stop: true
+          script: |
+            cd "${{ secrets.EC2_APP_DIR }}"
+            git pull --ff-only origin "${{ github.ref_name }}"
+            docker compose up -d --build
