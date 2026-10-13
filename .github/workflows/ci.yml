@@ -1,0 +1,49 @@
+
+name: FastAPI CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+
+jobs:
+  test:
+    name: Install, Test and Validate
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Download repository code
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2. Install Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # 3. Install uv
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      # 4. Install project dependencies
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      # 5. Run automated tests
+      - name: Run tests
+        run: uv run pytest -v
+
+      # 6. Validate Python syntax
+      - name: Validate Python syntax
+        run: |
+          uv run python -m compileall -q apps main.py
+
+      # 7. Validate Docker image build
+      - name: Build Docker image
+        run: docker build -t websocket-demo:ci .

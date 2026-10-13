@@ -830,6 +830,7 @@ const e2eeState = {
   db: null,                        // IDBDatabase
   identity: null,                  // loaded identity record
   initialized: false,
+  initializationPromise: null,
   // In-memory caches to avoid redundant IDB reads in the same page session
   sessionCache: new Map(),         // peerId → DoubleRatchetSession
   peerQueues: new Map(),           // peerId → serialised send/decrypt operations
@@ -951,9 +952,23 @@ async function maybeTopUpOPKs(db, identity) {
 
 /* ── initE2EE ────────────────────────────────────────────── */
 
-async function initE2EE() {
-  if (!state.session?.user_id) return
-  if (e2eeState.initialized) return
+function initE2EE() {
+  if (!state.session?.user_id || e2eeState.initialized) return Promise.resolve()
+  if (e2eeState.initializationPromise) return e2eeState.initializationPromise
+
+  const initialization = initializeE2EE()
+  e2eeState.initializationPromise = initialization
+  const clearInitialization = () => {
+    if (e2eeState.initializationPromise === initialization) {
+      e2eeState.initializationPromise = null
+    }
+  }
+  initialization.then(clearInitialization, clearInitialization)
+  return initialization
+}
+
+async function initializeE2EE() {
+  if (!state.session?.user_id || e2eeState.initialized) return
 
   const userId = state.session.user_id
   try {
