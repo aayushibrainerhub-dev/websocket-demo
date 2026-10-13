@@ -12,7 +12,7 @@ load_dotenv()
 class Base(DeclarativeBase):
 	pass
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./chat.db")
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 engine = create_async_engine(DATABASE_URL, connect_args=connect_args)
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
