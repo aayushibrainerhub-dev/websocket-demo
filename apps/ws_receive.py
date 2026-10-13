@@ -568,14 +568,33 @@ async def upload_prekey_bundle(
             e2ee.signed_prekey_id = body.signed_prekey_id
             e2ee.spk_signature = body.spk_signature
 
-        if body.one_time_prekeys:
+        if body.one_time_prekeys is not None:
+            expected_opks = {
+                opk.key_id: opk.public_key for opk in body.one_time_prekeys
+            }
+            existing_opks = (await session.execute(
+                select(OneTimePreKey).where(OneTimePreKey.user_id == user.id)
+            )).scalars().all()
+            retained_opks = {}
+
+            for existing_opk in existing_opks:
+                expected_public_key = expected_opks.get(existing_opk.key_id)
+                if expected_public_key != existing_opk.public_key:
+                    await session.delete(existing_opk)
+                elif existing_opk.key_id in retained_opks:
+                    retained_opks[existing_opk.key_id].used |= existing_opk.used
+                    await session.delete(existing_opk)
+                else:
+                    retained_opks[existing_opk.key_id] = existing_opk
+
             for opk in body.one_time_prekeys:
-                session.add(OneTimePreKey(
-                    user_id=user.id,
-                    key_id=opk.key_id,
-                    public_key=opk.public_key,
-                    used=False,
-                ))
+                if opk.key_id not in retained_opks:
+                    session.add(OneTimePreKey(
+                        user_id=user.id,
+                        key_id=opk.key_id,
+                        public_key=opk.public_key,
+                        used=False,
+                    ))
 
         await session.commit()
 

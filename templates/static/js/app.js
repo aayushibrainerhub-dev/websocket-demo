@@ -1112,7 +1112,10 @@ async function x3dhRespondSession(identity, senderIKBundle, ekPubJwk, opkId, spk
   let OPK_B_priv = null
   if (opkId !== null && opkId !== undefined) {
     const opkEntry = identity.opks.find(o => o.key_id === opkId)
-    if (opkEntry) OPK_B_priv = await importECDHPriv(opkEntry.priv)
+    if (!opkEntry) {
+      throw new Error(`[E2EE] One-time prekey ${opkId} is not available on this device`)
+    }
+    OPK_B_priv = await importECDHPriv(opkEntry.priv)
   }
 
   // Mirror of Alice's DH computations (roles swapped).
